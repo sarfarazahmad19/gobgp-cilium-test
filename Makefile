@@ -73,6 +73,39 @@ cilium-status: ## Run cilium status
 hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 	kubectl -n kube-system port-forward svc/hubble-ui 12000:80
 
+## ---- gobgp ----------------------------------------------------------
+
+.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes
+
+gobgp-up: net-create ## Start the GoBGP speaker container (background)
+	@echo "starting gobgp speaker..."
+	docker compose up -d gobgp
+	@echo "gobgp gRPC API available at localhost:50051"
+
+gobgp-down: ## Stop the GoBGP speaker container
+	docker compose stop gobgp 2>/dev/null || true
+	docker compose rm -f gobgp 2>/dev/null || true
+
+gobgp-apply: ## Apply Cilium BGP CRDs (peer config + cluster config + advertisement)
+	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-bgp.yaml
+	kubectl --kubeconfig $(KUBECONFIG) wait --for=condition=established crd/ciliumbgpclusterconfigs.cilium.io --timeout=30s || true
+
+gobgp-status: ## Show GoBGP neighbor state
+	@docker exec gobgp-speaker /go/bin/gobgp neighbor 2>/dev/null || \
+	  echo "gobgp container not running — try 'make gobgp-up' first"
+
+gobgp-routes: ## Show routes learned by GoBGP from Cilium peers
+	@docker exec gobgp-speaker /go/bin/gobgp global rib 2>/dev/null || \
+	  echo "gobgp container not running — try 'make gobgp-up' first"
+
+## ---- debug ----------------------------------------------------------
+
+.PHONY: netshoot
+
+netshoot: ## Run an ephemeral netshoot debug pod
+	kubectl --kubeconfig $(KUBECONFIG) run netshoot --rm -it \
+	  --restart=Never --image=nicolaka/netshoot -- /bin/bash
+
 ## ---- misc ------------------------------------------------------------
 
 .PHONY: kubeconfig clean

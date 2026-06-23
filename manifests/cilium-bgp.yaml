@@ -1,0 +1,54 @@
+---
+# CiliumBGPPeerConfig — default peer configuration (no auth, standard timers).
+# Referenced by CiliumBGPClusterConfig peers via peerConfigRef.
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: gobgp-default
+spec:
+  ebgpMultihop: 1
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"
+
+---
+# CiliumBGPClusterConfig — instructs Cilium's BGP Control Plane to instantiate
+# a BGP router on every node (nodeSelector is empty = all nodes) with local AS
+# 65001, peering with the GoBGP speaker at 172.19.0.10 (AS 65000).
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: gobgp-bgp
+spec:
+  nodeSelector: {}
+  bgpInstances:
+    - name: gobgp-instance
+      localASN: 65001
+      peers:
+        - name: gobgp-speaker
+          peerASN: 65000
+          peerAddress: "172.19.0.10"
+          peerConfigRef:
+            name: gobgp-default
+
+---
+# CiliumBGPAdvertisement — advertise PodCIDR routes and LoadBalancer Service IPs
+# to the GoBGP peer.
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: gobgp-advert
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    # Advertise the Pod CIDR of each node so external routers can reach pods.
+    - advertisementType: PodCIDR
+    # Advertise LoadBalancer service IPs (including those assigned by Cilium).
+    - advertisementType: Service
+      service:
+        addresses:
+          - LoadBalancerIP
