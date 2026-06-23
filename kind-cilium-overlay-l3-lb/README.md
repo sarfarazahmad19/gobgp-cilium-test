@@ -25,6 +25,9 @@ flowchart LR
 - Replaces the default CNI and kube-proxy with Cilium (eBPF)
 - Enables Cilium's BGP Control Plane (AS 65001) to advertise Pod CIDRs and
   LoadBalancer Service IPs via BGP
+- Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
+  allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
+  automatically produces a route in GoBGP's RIB
 - Runs a GoBGP speaker (AS 65000) on a shared Docker L2 bridge, peering with
   Cilium on every node
 - Ships with Hubble for observability (UI, relay, agent)
@@ -76,6 +79,7 @@ make hubble-ui
   make gobgp-down      Stop and remove the GoBGP speaker
   make gobgp-apply     Apply Cilium BGP CRDs to the cluster
   make gobgp-auth-secret  Create/update the k8s TCP MD5 secret
+  make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
   make gobgp-status    Show GoBGP neighbor state
   make gobgp-routes    Show routes learned by GoBGP
 
@@ -129,6 +133,7 @@ GoBGP RIB (current):
 | `CiliumBGPPeerConfig/gobgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
 | `CiliumBGPClusterConfig/gobgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
 | `CiliumBGPAdvertisement/gobgp-advert` | Labeled `advertise: bgp`; advertises PodCIDR + Service LoadBalancerIP |
+| `CiliumLoadBalancerIPPool/gobgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
 
 
 ### GoBGP config (`gobgp/gobgpd.toml`)
@@ -136,6 +141,30 @@ GoBGP RIB (current):
 Local AS 65000, router ID 172.19.0.10. Two neighbors: 172.19.0.3
 (gobgp-control-plane) and 172.19.0.4 (gobgp-worker), both AS 65001, TCP MD5
 auth enabled. Default accept policy for import and export.
+
+### Verifying LB route advertisement
+
+`make up` applies the IP pool automatically. To test the full path:
+
+```sh
+# 1. Apply the sample LoadBalancer Service
+kubectl apply -f manifests/svc-lb.yaml
+
+# 2. Check the Service got an IP from the pool
+kubectl get svc test-lb
+# EXTERNAL-IP column should be 172.19.0.200 (not <pending>)
+
+# 3. Check GoBGP learned the route
+make gobgp-routes
+# → 172.19.0.200/32 via 172.19.0.3 and 172.19.0.4 (ECMP next-hops)
+```
+
+The route is advertised even without matching pods — BGP is "up" but traffic
+blackholes until pods exist. Create matching pods with:
+```sh
+kubectl run test --image=nginx --labels=app=test --port=80
+```
+See [`findings.md`](findings.md) for ECMP behavior and endpoint health details.
 
 ## Cluster details
 

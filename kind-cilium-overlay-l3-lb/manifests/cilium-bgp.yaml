@@ -54,7 +54,12 @@ spec:
     # Advertise the Pod CIDR of each node so external routers can reach pods.
     - advertisementType: PodCIDR
     # Advertise LoadBalancer service IPs (including those assigned by Cilium).
+    # NOTE: selector is required — without it no services match. The NotIn
+    # expression below matches ALL services (a documented Cilium idiom).
     - advertisementType: Service
       service:
         addresses:
           - LoadBalancerIP
+      selector:
+        matchExpressions:
+          - {key: somekey, operator: NotIn, values: ['never-used-value']}

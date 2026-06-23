@@ -46,7 +46,7 @@ net-rm: ## Remove both docker networks (gobgp-net + kind cluster bridge)
 
 .PHONY: up cluster-up down status ps logs
 
-up: cluster-up cilium-install gobgp-auth-secret gobgp-apply gobgp-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + speaker
+up: cluster-up cilium-install gobgp-auth-secret gobgp-apply lb-pool-apply gobgp-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker
 	@echo
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
@@ -91,7 +91,7 @@ hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 
 BGP_AUTH_PASSWORD ?= gobgp-md5-secret-2026
 
-.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret
+.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret lb-pool-apply
 
 gobgp-up: net-create ## Start the GoBGP speaker container (background)
 	@echo "starting gobgp speaker..."
@@ -112,6 +112,9 @@ gobgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
 	  -n kube-system \
 	  --from-literal=password=$(BGP_AUTH_PASSWORD) \
 	  --dry-run=client -o yaml | kubectl --kubeconfig $(KUBECONFIG) apply -f -
+
+lb-pool-apply: ## Apply CiliumLoadBalancerIPPool for LB IPAM
+	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-lb-pool.yaml
 
 gobgp-status: ## Show GoBGP neighbor state
 	@docker exec gobgp-speaker /go/bin/gobgp neighbor 2>/dev/null || \
