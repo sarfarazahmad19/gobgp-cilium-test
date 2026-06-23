@@ -6,13 +6,13 @@ Plane, peered with an external BGP speaker over a shared Docker network.
 ```mermaid
 flowchart LR
     subgraph bgp_net["gobgp-net (172.19.0.0/16)"]
-        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001<br/>PodCIDR: 10.244.0.0/24"]
-        wk["gobgp-worker<br/>172.19.0.4 / AS 65001<br/>PodCIDR: 10.244.1.0/24"]
+        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001"]
+        wk["gobgp-worker<br/>172.19.0.4 / AS 65001"]
         sp["frr-speaker<br/>172.19.0.10 / AS 65000<br/>FRR bgpd+zebra<br/>kernel FIB via zebra"]
     end
 
-    cp -- "BGP session (TCP :179, TCP MD5 auth) --> advertises 10.244.0.0/24" --- sp
-    wk -- "BGP session (TCP :179, TCP MD5 auth) --> advertises 10.244.1.0/24" --- sp
+    cp -- "BGP session (TCP :179, TCP MD5 auth) --> advertises LB IPs" --- sp
+    wk -- "BGP session (TCP :179, TCP MD5 auth) --> advertises LB IPs" --- sp
 
     style cp fill:#c9e6ff
     style wk fill:#c9e6ff
@@ -23,11 +23,11 @@ flowchart LR
 
 - Spins up a 2-node Kubernetes cluster (v1.33) using [kind][kind]
 - Replaces the default CNI and kube-proxy with Cilium (eBPF)
-- Enables Cilium's BGP Control Plane (AS 65001) to advertise Pod CIDRs and
-  LoadBalancer Service IPs via BGP
+- Enables Cilium's BGP Control Plane (AS 65001) to advertise LoadBalancer
+  Service IPs via BGP
 - Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
   allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
-  automatically produces a route in GoBGP's RIB
+  automatically produces a route in FRR's RIB
 - Runs an FRR speaker (AS 65000) on a shared Docker L2 bridge, peering with
   Cilium on every node. FRR ships bgpd+zebra together, so routes are
   installed into the kernel FIB for local reachability.
@@ -107,23 +107,23 @@ make hubble-ui
   Service CIDR: 10.96.0.0/16
 
   BGP participants (all on gobgp-net):
-    gobgp-control-plane  172.19.0.3  AS 65001  PodCIDR: 10.244.0.0/24
-    gobgp-worker         172.19.0.4  AS 65001  PodCIDR: 10.244.1.0/24
+    gobgp-control-plane  172.19.0.3  AS 65001
+    gobgp-worker         172.19.0.4  AS 65001
     frr-speaker          172.19.0.10 AS 65000
 ```
 
 ## BGP peering
 
 Cilium's BGP Control Plane on each node peers with the FRR speaker over
-the shared `gobgp-net` L2 bridge. Each kind cluster gets its own Docker
-bridge (this one uses `gobgp-kind`) to avoid L2 exposure to other clusters
-on the host. The speaker learns PodCIDR routes and installs them into the
-kernel FIB via FRR's zebra daemon:
+the shared `gobgp-net` L2 bridge. Only LoadBalancer Service IPs are
+advertised — PodCIDR routes are intentionally excluded because Cilium's
+VXLAN overlay handles pod-to-pod traffic internally. External traffic
+reaches pods exclusively through LoadBalancer Services.
+
+FRR learns the LB VIP and installs it into the kernel FIB via zebra:
 
 ```
 FRR RIB / kernel FIB:
-  10.244.0.0/24 → 172.19.0.3  AS 65001    (gobgp-control-plane)
-  10.244.1.0/24 → 172.19.0.4  AS 65001    (gobgp-worker)
   172.19.0.200/32 → 172.19.0.3 + 172.19.0.4  (ECMP, LoadBalancer IP)
 ```
 
@@ -133,7 +133,7 @@ FRR RIB / kernel FIB:
 |----------|---------|
 | `CiliumBGPPeerConfig/gobgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
 | `CiliumBGPClusterConfig/gobgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
-| `CiliumBGPAdvertisement/gobgp-advert` | Labeled `advertise: bgp`; advertises PodCIDR + Service LoadBalancerIP |
+| `CiliumBGPAdvertisement/gobgp-advert` | Labeled `advertise: bgp`; advertises Service LoadBalancerIP |
 | `CiliumLoadBalancerIPPool/gobgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
 
 

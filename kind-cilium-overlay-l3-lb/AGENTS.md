@@ -5,7 +5,7 @@
 Local BGP networking lab using Cilium's BGP Control Plane on a kind
 (Kubernetes-in-Docker) cluster. The environment lets you peer an external BGP
 speaker (FRR, GoBGP, Bird) with Cilium to test route advertisement of K8s
-Service LoadBalancer IPs and Pod CIDRs.
+Service LoadBalancer IPs.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ Service LoadBalancer IPs and Pod CIDRs.
         │                       │                    │
         └─────── BGP peer ──────┼────────────────────┘
                                 │
-                    (advertises PodCIDR + Service LB IPs)
+                    (advertises Service LB IPs)
 ```
 
 - **Cluster name:** `gobgp`
@@ -147,7 +147,7 @@ Cilium BGP configuration is applied via `manifests/cilium-bgp.yaml`:
   (TCP MD5) + `families[ipv4].advertisements.matchLabels: {advertise: bgp}`
 - `CiliumBGPClusterConfig/gobgp-bgp` — AS 65001, peer 172.19.0.10:179 AS 65000
 - `CiliumBGPAdvertisement/gobgp-advert` — labelled `advertise: bgp`, advertises
-  PodCIDR + Service LoadBalancerIP
+  Service LoadBalancerIP
 - k8s Secret `gobgp-auth` in `kube-system` (key `password`) — created by
   `make gobgp-auth-secret`
 
@@ -173,8 +173,7 @@ If `wget http://172.19.0.200` fails with "Host is unreachable":
    ```
    docker exec frr-speaker ip route show proto bgp
    ```
-   Expected: PodCIDR routes (10.244.x.x/24) and LB IP (172.19.0.200) with
-   ECMP nexthops.
+   Expected: only the LB IP (172.19.0.200) with ECMP nexthops.
 
 3. Test BGP peering:
    ```

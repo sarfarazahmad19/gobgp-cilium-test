@@ -41,8 +41,9 @@ spec:
             name: gobgp-default
 
 ---
-# CiliumBGPAdvertisement — advertise PodCIDR routes and LoadBalancer Service IPs
-# to the GoBGP peer.
+# CiliumBGPAdvertisement — advertise LoadBalancer Service IPs to the FRR peer.
+# PodCIDR is NOT advertised because Cilium uses VXLAN overlay for pod-to-pod
+# traffic — external traffic reaches pods via LoadBalancer Services only.
 apiVersion: cilium.io/v2
 kind: CiliumBGPAdvertisement
 metadata:
@@ -51,8 +52,6 @@ metadata:
     advertise: bgp
 spec:
   advertisements:
-    # Advertise the Pod CIDR of each node so external routers can reach pods.
-    - advertisementType: PodCIDR
     # Advertise LoadBalancer service IPs (including those assigned by Cilium).
     # NOTE: selector is required — without it no services match. The NotIn
     # expression below matches ALL services (a documented Cilium idiom).

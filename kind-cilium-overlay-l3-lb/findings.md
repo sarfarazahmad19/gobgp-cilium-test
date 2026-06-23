@@ -11,7 +11,7 @@ lab. Each entry explains a behavior, why it happens, and what to do about it.
 - Created `Service/test-lb` (`type: LoadBalancer`, no matching pods).
 - Cilium allocated a `LoadBalancer` IP from `CiliumLoadBalancerIPPool/gobgp-lb-pool`
   (e.g. `172.19.0.200`).
-- GoBGP learned `172.19.0.200/32` with **two ECMP next-hops** (one per node).
+- FRR learned `172.19.0.200/32` with **two ECMP next-hops** (one per node).
 - Both nodes had zero local endpoints for the service.
 
 **Why:** `CiliumBGPAdvertisement` advertises the **Service VIP**, not the
