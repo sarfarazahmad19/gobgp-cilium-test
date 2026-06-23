@@ -1,6 +1,6 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: gobgp
+name: overlay-l3-bgp
 
 # Use the latest pre-built kind node image. kind v0.32.0 ships node images
 # for v1.33.12, v1.34.8, v1.35.5, v1.36.1. Pin a digest for reproducibility
@@ -20,6 +20,8 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-ip: 0.0.0.0
+  - role: worker
+    image: kindest/node:v1.33.0
   - role: worker
     image: kindest/node:v1.33.0
 

@@ -1,4 +1,4 @@
-# Findings — gobgp-kind-cilium lab
+# Findings — bgp-kind-cilium lab
 
 Operational and behavioral notes accumulated while building and exercising the
 lab. Each entry explains a behavior, why it happens, and what to do about it.
@@ -9,7 +9,7 @@ lab. Each entry explains a behavior, why it happens, and what to do about it.
 
 **What we saw:**
 - Created `Service/test-lb` (`type: LoadBalancer`, no matching pods).
-- Cilium allocated a `LoadBalancer` IP from `CiliumLoadBalancerIPPool/gobgp-lb-pool`
+- Cilium allocated a `LoadBalancer` IP from `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool`
   (e.g. `172.19.0.200`).
 - FRR learned `172.19.0.200/32` with **two ECMP next-hops** (one per node).
 - Both nodes had zero local endpoints for the service.
@@ -32,7 +32,7 @@ dropped/refused. BGP looks "up", the service is a black hole.
   kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml run test \
     --image=nginx --labels=app=test --port=80
   ```
-  Re-check `make frr-routes` and curl the VIP from `gobgp-net`.
+  Re-check `make frr-routes` and curl the VIP from `bgp-net`.
 
 **How to make BGP honestly reflect endpoint health (advanced, optional):**
 - `externalTrafficPolicy: Local` on the Service: a node withdraws its route
@@ -54,7 +54,7 @@ this; this finding covers the endpoint-orthogonal side.
   same Service prefix with two next-hops: `172.19.0.3` and `172.19.0.4`.
 
 **Why:** Every node in the cluster runs a Cilium BGP instance
-(`nodeSelector: {}` in `CiliumBGPClusterConfig/gobgp-bgp`), each peers with
+(`nodeSelector: {}` in `CiliumBGPClusterConfig/overlay-l3-bgp-bgp`), each peers with
 FRR at `172.19.0.10` AS 65000, and each advertises the same Service
 because the `CiliumBGPAdvertisement` has no per-node selector. FRR
 receives two equal-cost paths and installs both as ECMP next-hops.
@@ -90,10 +90,10 @@ Three checks, in order of usefulness:
     # or: docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"
     ```
     Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
-    `gobgp-net` (`172.19.0.3` / `172.19.0.4`).
+    `bgp-net` (`172.19.0.3` / `172.19.0.4`).
 
 If 1 passes but 2 fails → Cilium BGP CP can't reach the speaker; check
-`authSecretRef` secret, TCP MD5 password match, and `gobgp-net` connectivity.
+`authSecretRef` secret, TCP MD5 password match, and `bgp-net` connectivity.
 If 2 passes but 3 doesn't show the Service prefix → advertisement selector
 isn't matching; verify the `CiliumBGPAdvertisement` and the Service labels.
 

@@ -4,9 +4,9 @@
 set -eu
 
 KUBECONFIG="${KUBECONFIG:-./.kubeconfig/kubeconfig.yaml}"
-CP_CONTAINER="${CP_CONTAINER:-gobgp-control-plane}"
+CP_CONTAINER="${CP_CONTAINER:-overlay-l3-bgp-control-plane}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.19.5}"
-KIND_NETWORK="${KIND_NETWORK:-gobgp-kind}"
+KIND_NETWORK="${KIND_NETWORK:-bgp-kind}"
 
 log() { printf "[install-cilium] %s\n" "$*"; }
 
@@ -44,9 +44,7 @@ helm upgrade --install cilium cilium/cilium \
   --set bpf.masquerade=true \
   --set bgpControlPlane.enabled=true \
   --set devices='{eth0,eth1}' \
-  --set directRoutingDevice=eth0 \
-  --wait \
-  --timeout 5m
+  --set directRoutingDevice=eth0
 
 log "waiting for cilium daemonset to be ready"
 kubectl --kubeconfig "$KUBECONFIG" -n kube-system rollout status ds/cilium --timeout=180s

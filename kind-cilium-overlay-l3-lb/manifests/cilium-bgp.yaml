@@ -5,14 +5,14 @@
 # (default: kube-system) that must contain a key named `password` with the
 # shared MD5 key. On the GoBGP side, the matching key is set in
 # gobgp/gobgpd.toml as `auth-password = "..."` under each [neighbors.config].
-# Create the secret with: make gobgp-auth-secret
+# Create the secret with: make bgp-auth-secret
 apiVersion: cilium.io/v2
 kind: CiliumBGPPeerConfig
 metadata:
-  name: gobgp-default
+  name: overlay-l3-bgp-default
 spec:
   ebgpMultihop: 1
-  authSecretRef: gobgp-auth
+  authSecretRef: bgp-auth
   families:
     - afi: ipv4
       safi: unicast
@@ -22,23 +22,27 @@ spec:
 
 ---
 # CiliumBGPClusterConfig — instructs Cilium's BGP Control Plane to instantiate
-# a BGP router on every node (nodeSelector is empty = all nodes) with local AS
-# 65001, peering with the GoBGP speaker at 172.19.0.10 (AS 65000).
+# a BGP router on worker nodes only (control-plane is excluded — it runs
+# management functions, not data-plane). Each worker peers with the FRR
+# speaker at 172.19.0.10 (AS 65000).
 apiVersion: cilium.io/v2
 kind: CiliumBGPClusterConfig
 metadata:
-  name: gobgp-bgp
+  name: overlay-l3-bgp-bgp
 spec:
-  nodeSelector: {}
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
   bgpInstances:
-    - name: gobgp-instance
+    - name: overlay-l3-bgp-instance
       localASN: 65001
       peers:
-        - name: gobgp-speaker
+        - name: overlay-l3-bgp-speaker
           peerASN: 65000
           peerAddress: "172.19.0.10"
           peerConfigRef:
-            name: gobgp-default
+            name: overlay-l3-bgp-default
 
 ---
 # CiliumBGPAdvertisement — advertise LoadBalancer Service IPs to the FRR peer.
@@ -47,7 +51,7 @@ spec:
 apiVersion: cilium.io/v2
 kind: CiliumBGPAdvertisement
 metadata:
-  name: gobgp-advert
+  name: overlay-l3-bgp-advert
   labels:
     advertise: bgp
 spec:

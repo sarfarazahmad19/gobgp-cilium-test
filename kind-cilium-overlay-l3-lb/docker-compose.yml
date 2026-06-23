@@ -1,8 +1,8 @@
-name: gobgp-kind-cilium
+name: bgp-kind-cilium
 
 # A tiny controller container runs `kind create cluster` against the host
 # docker socket, then keeps itself alive so docker-compose considers the
-# service "up".  The kind node containers end up on the shared gobgp-net
+# service "up".  The kind node containers end up on the shared bgp-net
 # network (see scripts/kind-up.sh).
 #
 # Use `make cluster-up` (or `make up` for the full bring-up) instead of
@@ -34,16 +34,16 @@ services:
       - ./scripts/kind-down.sh:/config/scripts/kind-down.sh:ro
       - ./.kubeconfig:/data
     networks:
-      - gobgp-net
+      - bgp-net
     environment:
-      - NETWORK_NAME=gobgp-net
-      - KIND_NETWORK=gobgp-kind
+      - NETWORK_NAME=bgp-net
+      - KIND_NETWORK=bgp-kind
       - KUBECONFIG_OUT=/data/kubeconfig.yaml
     restart: "no"
 
   # ---- FRR BGP speaker -------------------------------------------------
   # Peers with Cilium's BGP Control Plane on each kind node via the
-  # shared gobgp-net L2 segment. Receives PodCIDR and Service LB routes
+  # shared bgp-net L2 segment. Receives PodCIDR and Service LB routes
   # and installs them into the kernel FIB (via zebra) for local reachability.
   frr:
     image: docker.io/frrouting/frr:latest
@@ -55,10 +55,10 @@ services:
       - ./frr/daemons:/etc/frr/daemons:ro
       - ./frr/frr.conf:/etc/frr/frr.conf:ro
     networks:
-      gobgp-net:
+      bgp-net:
         ipv4_address: 172.19.0.10
     restart: unless-stopped
 
 networks:
-  gobgp-net:
+  bgp-net:
     external: true

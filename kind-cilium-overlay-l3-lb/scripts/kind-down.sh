@@ -7,7 +7,7 @@ set -eu
 # the compose file's `command` which includes apk add).
 apk add --no-cache docker-cli bash >/dev/null 2>&1 || true
 
-CLUSTER_NAME="gobgp"
+CLUSTER_NAME="overlay-l3-bgp"
 
 log() { printf "[kind-down] %s\n" "$*"; }
 

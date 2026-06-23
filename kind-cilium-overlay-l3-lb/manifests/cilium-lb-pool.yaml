@@ -1,5 +1,5 @@
 ---
-# CiliumLoadBalancerIPPool — allocates LoadBalancer IPs from the gobgp-net
+# CiliumLoadBalancerIPPool — allocates LoadBalancer IPs from the bgp-net
 # subnet (172.19.0.0/16) so they are directly routable from the GoBGP speaker
 # (172.19.0.10) without NAT. The advertisement in cilium-bgp.yaml already
 # includes Service/LoadBalancerIP, so any IP assigned from this pool will be
@@ -7,7 +7,7 @@
 apiVersion: cilium.io/v2
 kind: CiliumLoadBalancerIPPool
 metadata:
-  name: gobgp-lb-pool
+  name: overlay-l3-bgp-lb-pool
 spec:
   blocks:
     - start: "172.19.0.200"

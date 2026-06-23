@@ -1,12 +1,12 @@
 #!/bin/sh
 # Bring up the kind cluster (idempotent) and attach the node containers to
-# the shared gobgp-net network so sidecar services (e.g. gobgp) can reach
+# the shared bgp-net network so sidecar services (e.g. FRR) can reach
 # them on the same L2 segment.
 set -eu
 
-CLUSTER_NAME="gobgp"
-NETWORK_NAME="${NETWORK_NAME:-gobgp-net}"
-KIND_NETWORK="${KIND_NETWORK:-gobgp-kind}"
+CLUSTER_NAME="overlay-l3-bgp"
+NETWORK_NAME="${NETWORK_NAME:-bgp-net}"
+KIND_NETWORK="${KIND_NETWORK:-bgp-kind}"
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-/data/kubeconfig.yaml}"
 
 log() { printf "[kind-up] %s\n" "$*"; }
@@ -38,14 +38,15 @@ else
   kind create cluster --config /config/kind.yaml --retain
 fi
 
-# Attach every node to the shared network so peer containers (gobgp, etc.)
+# Attach every node to the shared network so peer containers (frr, etc.)
 # can reach them on the same L2 segment. Tolerate already-attached state.
 # IPs are pinned here and must match the `neighbor-address` values in
-# gobgp/gobgpd.toml — keep both in sync.
+# frr/frr.conf — keep both in sync.
 ip_for_node() {
   case "$1" in
-    gobgp-control-plane) echo "172.19.0.3" ;;
-    gobgp-worker)        echo "172.19.0.4" ;;
+    overlay-l3-bgp-control-plane) echo "172.19.0.3" ;;
+    overlay-l3-bgp-worker)        echo "172.19.0.4" ;;
+    overlay-l3-bgp-worker2)       echo "172.19.0.5" ;;
     *) log "WARN: no pinned IP for node '$1' on $NETWORK_NAME — using Docker DHCP" >&2
        echo "" ;;
   esac

@@ -1,22 +1,21 @@
-# gobgp-kind-cilium
+# bgp-kind-cilium
 
 Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
 
-```mermaid
-flowchart LR
-    subgraph bgp_net["gobgp-net (172.19.0.0/16)"]
-        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001"]
-        wk["gobgp-worker<br/>172.19.0.4 / AS 65001"]
-        sp["frr-speaker<br/>172.19.0.10 / AS 65000<br/>FRR bgpd+zebra<br/>kernel FIB via zebra"]
-    end
-
-    cp -- "BGP session (TCP :179, TCP MD5 auth) --> advertises LB IPs" --- sp
-    wk -- "BGP session (TCP :179, TCP MD5 auth) --> advertises LB IPs" --- sp
-
-    style cp fill:#c9e6ff
-    style wk fill:#c9e6ff
-    style sp fill:#ffe6cc
+```
+                     bgp-net (Docker bridge, L2, 172.19.0.0/16)
+             ┌──────────────────────────────────────────────────────┐
+             │                                                      │
+    overlay-l3-bgp-control-plane     overlay-l3-bgp-worker          frr-speaker
+    (kind node, K8s CP)    (kind node, worker)   (FRR bgpd+zebra)
+    172.19.0.3              172.19.0.4           172.19.0.10
+    AS 65001                AS 65001             AS 65000
+    Cilium BGP CP          Cilium BGP CP
+        │                       │                    │
+        └─────── BGP peer ──────┼────────────────────┘
+                                │
+                    (advertises LB Service IPs)
 ```
 
 ## What this does
@@ -78,13 +77,13 @@ make hubble-ui
 
   make frr-up          Start the FRR speaker (background)
   make frr-down        Stop and remove the FRR speaker
-  make gobgp-apply     Apply Cilium BGP CRDs to the cluster
-  make gobgp-auth-secret  Create/update the k8s TCP MD5 secret
+  make bgp-apply     Apply Cilium BGP CRDs to the cluster
+  make bgp-auth-secret  Create/update the k8s TCP MD5 secret
   make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
   make frr-status      Show FRR BGP neighbor state (vtysh)
   make frr-routes      Show routes learned by FRR (RIB)
 
-  make net-create      Create the shared gobgp-net network
+  make net-create      Create the shared bgp-net network
   make net-rm          Remove the shared network
 
   make clean           Tear down cluster + remove network + wipe kubeconfig
@@ -99,23 +98,23 @@ make hubble-ui
     localhost:12000 →  Hubble UI
 
   Docker networks:
-    gobgp-kind     172.20.0.0/16  Dedicated bridge for cluster management
+    bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management
                                   (isolated from other kind clusters)
-    gobgp-net      172.19.0.0/16  Shared bridge for BGP peering
+    bgp-net      172.19.0.0/16  Shared bridge for BGP peering
 
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
 
-  BGP participants (all on gobgp-net):
-    gobgp-control-plane  172.19.0.3  AS 65001
-    gobgp-worker         172.19.0.4  AS 65001
+  BGP participants (all on bgp-net):
+    overlay-l3-bgp-control-plane  172.19.0.3  AS 65001
+    overlay-l3-bgp-worker         172.19.0.4  AS 65001
     frr-speaker          172.19.0.10 AS 65000
 ```
 
 ## BGP peering
 
 Cilium's BGP Control Plane on each node peers with the FRR speaker over
-the shared `gobgp-net` L2 bridge. Only LoadBalancer Service IPs are
+the shared `bgp-net` L2 bridge. Only LoadBalancer Service IPs are
 advertised — PodCIDR routes are intentionally excluded because Cilium's
 VXLAN overlay handles pod-to-pod traffic internally. External traffic
 reaches pods exclusively through LoadBalancer Services.
@@ -131,16 +130,16 @@ FRR RIB / kernel FIB:
 
 | Resource | Purpose |
 |----------|---------|
-| `CiliumBGPPeerConfig/gobgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
-| `CiliumBGPClusterConfig/gobgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
-| `CiliumBGPAdvertisement/gobgp-advert` | Labeled `advertise: bgp`; advertises Service LoadBalancerIP |
-| `CiliumLoadBalancerIPPool/gobgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
+| `CiliumBGPPeerConfig/overlay-l3-bgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
+| `CiliumBGPClusterConfig/overlay-l3-bgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
+| `CiliumBGPAdvertisement/overlay-l3-bgp-advert` | Labeled `advertise: bgp`; advertises Service LoadBalancerIP |
+| `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
 
 
 ### FRR config (`frr/frr.conf`)
 
 Local AS 65000, router ID 172.19.0.10. Two neighbors: 172.19.0.3
-(gobgp-control-plane) and 172.19.0.4 (gobgp-worker), both AS 65001, TCP MD5
+(overlay-l3-bgp-control-plane) and 172.19.0.4 (overlay-l3-bgp-worker), both AS 65001, TCP MD5
 auth enabled. Includes `no bgp ebgp-requires-policy` to accept routes
 without explicit policy. Zebra is enabled (`frr/daemons`) to install routes
 into the kernel FIB.
@@ -179,7 +178,7 @@ See [`findings.md`](findings.md) for ECMP behavior and endpoint health details.
 ## Cluster details
 
 ```
-  Cluster name:  gobgp
+  Cluster name:  overlay-l3-bgp
   Nodes:         1 control-plane + 1 worker
   Image:         kindest/node:v1.33.0
   CNI:           Cilium (kindnet disabled)

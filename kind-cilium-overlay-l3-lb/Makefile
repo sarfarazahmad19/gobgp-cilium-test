@@ -1,10 +1,10 @@
 SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
-CLUSTER_NAME      ?= gobgp
-CP_CONTAINER      ?= gobgp-control-plane
-NETWORK_NAME      ?= gobgp-net
-KIND_NETWORK      ?= gobgp-kind
+CLUSTER_NAME      ?= overlay-l3-bgp
+CP_CONTAINER      ?= overlay-l3-bgp-control-plane
+NETWORK_NAME      ?= bgp-net
+KIND_NETWORK      ?= bgp-kind
 KUBECONFIG        ?= $(PWD)/.kubeconfig/kubeconfig.yaml
 KIND_IMAGE        ?= kindest/node:v1.33.0
 CILIUM_VERSION    ?= 1.19.5
@@ -28,30 +28,30 @@ net-create: ## Create docker networks (idempotent)
 	@if docker network inspect $(NETWORK_NAME) >/dev/null 2>&1; then \
 	  echo "network $(NETWORK_NAME) already exists"; \
 	else \
-	  docker network create --driver bridge $(NETWORK_NAME); \
+	  docker network create --driver bridge --subnet 172.19.0.0/16 $(NETWORK_NAME); \
 	  echo "created network $(NETWORK_NAME)"; \
 	fi
 	@if docker network inspect $(KIND_NETWORK) >/dev/null 2>&1; then \
 	  echo "network $(KIND_NETWORK) already exists"; \
 	else \
-	  docker network create --driver bridge $(KIND_NETWORK); \
+	  docker network create --driver bridge --subnet 172.20.0.0/16 $(KIND_NETWORK); \
 	  echo "created network $(KIND_NETWORK)"; \
 	fi
 
-net-rm: ## Remove both docker networks (gobgp-net + kind cluster bridge)
+net-rm: ## Remove both docker networks (bgp-net + kind cluster bridge)
 	docker network rm $(NETWORK_NAME) 2>/dev/null || true
 	docker network rm $(KIND_NETWORK) 2>/dev/null || true
 
 ## ---- cluster lifecycle -----------------------------------------------
 
-.PHONY: up cluster-up down status ps logs
+.PHONY: up cluster-up down status ps logs cilium-uninstall
 
-up: cluster-up cilium-install gobgp-auth-secret gobgp-apply lb-pool-apply frr-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker
+up: cluster-up cilium-uninstall cilium-install bgp-auth-secret bgp-apply lb-pool-apply frr-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker
 	@echo
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
 
-cluster-up: net-create ## Bring up just the kind cluster (attaches to gobgp-net via kind-up.sh)
+cluster-up: net-create ## Bring up just the kind cluster (attaches to bgp-net via kind-up.sh)
 	docker compose run --rm kind
 	@echo
 	@echo "kubeconfig: $(KUBECONFIG)"
@@ -76,10 +76,13 @@ logs: ## Tail the kind controller logs
 
 ## ---- cilium ---------------------------------------------------------
 
-.PHONY: cilium-install cilium-status hubble-ui
+.PHONY: cilium-install cilium-status hubble-ui cilium-uninstall
 
 cilium-install: ## Install/upgrade cilium on the cluster
 	./scripts/install-cilium.sh
+
+cilium-uninstall: ## Uninstall cilium from the cluster
+	helm uninstall cilium --namespace kube-system --kubeconfig $(KUBECONFIG) --wait=false 2>/dev/null || true
 
 cilium-status: ## Run cilium status
 	kubectl -n kube-system exec deploy/cilium-operator -- cilium status --brief
@@ -89,9 +92,9 @@ hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 
 ## ---- frr ------------------------------------------------------------
 
-BGP_AUTH_PASSWORD ?= gobgp-md5-secret-2026
+BGP_AUTH_PASSWORD ?= bgp-md5-secret-2026
 
-.PHONY: frr-up frr-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret lb-pool-apply
+.PHONY: frr-up frr-down bgp-apply bgp-auth-secret lb-pool-apply
 
 frr-up: net-create ## Start the FRR BGP speaker container (background)
 	@echo "starting FRR BGP speaker..."
@@ -102,13 +105,13 @@ frr-down: ## Stop the FRR BGP speaker container
 	docker compose stop frr 2>/dev/null || true
 	docker compose rm -f frr 2>/dev/null || true
 
-gobgp-apply: ## Apply Cilium BGP CRDs (peer config + cluster config + advertisement)
+bgp-apply: ## Apply Cilium BGP CRDs (peer config + cluster config + advertisement)
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-bgp.yaml
 	kubectl --kubeconfig $(KUBECONFIG) wait --for=condition=established crd/ciliumbgpclusterconfigs.cilium.io --timeout=30s || true
 
-gobgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
-	@echo "creating secret gobgp-auth in kube-system (BGP TCP MD5 password)"
-	kubectl --kubeconfig $(KUBECONFIG) create secret generic gobgp-auth \
+bgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
+	@echo "creating secret bgp-auth in kube-system (BGP TCP MD5 password)"
+	kubectl --kubeconfig $(KUBECONFIG) create secret generic bgp-auth \
 	  -n kube-system \
 	  --from-literal=password=$(BGP_AUTH_PASSWORD) \
 	  --dry-run=client -o yaml | kubectl --kubeconfig $(KUBECONFIG) apply -f -
