@@ -1,12 +1,18 @@
 ---
-# CiliumBGPPeerConfig — default peer configuration (no auth, standard timers).
+# CiliumBGPPeerConfig — default peer configuration with TCP MD5 auth (RFC 2385).
 # Referenced by CiliumBGPClusterConfig peers via peerConfigRef.
+# The authSecretRef points to a k8s Secret in the BGP secrets namespace
+# (default: kube-system) that must contain a key named `password` with the
+# shared MD5 key. On the GoBGP side, the matching key is set in
+# gobgp/gobgpd.toml as `auth-password = "..."` under each [neighbors.config].
+# Create the secret with: make gobgp-auth-secret
 apiVersion: cilium.io/v2
 kind: CiliumBGPPeerConfig
 metadata:
   name: gobgp-default
 spec:
   ebgpMultihop: 1
+  authSecretRef: gobgp-auth
   families:
     - afi: ipv4
       safi: unicast

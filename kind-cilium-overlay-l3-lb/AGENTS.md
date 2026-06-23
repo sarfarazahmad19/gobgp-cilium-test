@@ -29,7 +29,8 @@ Service LoadBalancer IPs and Pod CIDRs.
 - **Cilium version:** 1.19.5
 - **CNI:** Cilium (default kindnet disabled)
 - **kube-proxy:** disabled (Cilium strict kube-proxy replacement via eBPF)
-- **BGP:** Cilium BGP Control Plane enabled (`bgpControlPlane.enabled=true`)
+- **BGP:** Cilium BGP Control Plane enabled (`bgpControlPlane.enabled=true`),
+  TCP MD5 auth (RFC 2385) enabled on the GoBGP peer
 - **Observability:** Hubble (agent, relay, UI) enabled
 - **IPAM:** Kubernetes mode (`ipam.mode=kubernetes`)
 
@@ -49,18 +50,26 @@ Service LoadBalancer IPs and Pod CIDRs.
 
 ## Workflow
 
+`make up` is a full bring-up (cluster + cilium + auth secret + BGP CRDs +
+speaker). `make clean` is the symmetric full tear-down. The per-step
+sub-targets are exposed for surgical use:
+
 ```sh
-make up              # bring up cluster (idempotent)
-make status          # check cluster health
-make cilium-install  # install/upgrade Cilium (idempotent)
-make cilium-status   # quick Cilium health check
-make gobgp-up        # start GoBGP speaker (background)
-make gobgp-apply     # apply Cilium BGP CRDs
-make gobgp-status    # check BGP peering state
-make gobgp-routes    # show learned routes
-make hubble-ui       # port-forward Hubble UI to localhost:12000
-make down            # tear down cluster
-make clean           # tear down cluster + remove docker network
+make up                  # full bring-up (idempotent)
+make cluster-up          # just the kind cluster (skip cilium/gobgp)
+make cilium-install      # install/upgrade Cilium (idempotent)
+make gobgp-auth-secret   # create k8s secret gobgp-auth (TCP MD5 password) — idempotent
+make gobgp-apply         # apply Cilium BGP CRDs
+make gobgp-up            # start GoBGP speaker (background)
+
+make status              # check cluster health
+make cilium-status       # quick Cilium health check
+make gobgp-status        # check BGP peering state
+make gobgp-routes        # show learned routes
+make hubble-ui           # port-forward Hubble UI to localhost:12000
+
+make down                # stop speaker + tear down cluster
+make clean               # down + remove gobgp-net + wipe kubeconfig
 ```
 
 ## Cilium install details
@@ -84,7 +93,8 @@ bpf.masquerade=true
 
 - `kind` network: default Docker network kind creates for the cluster
 - `gobgp-net`: shared external bridge network for connecting BGP peers
-  (created on first `make up`, survives cluster teardown)
+  (created on first `make up`, survives cluster teardown — removed by
+  `make clean`)
 - Pod CIDR: `10.244.0.0/16`
 - Service CIDR: `10.96.0.0/16`
 
@@ -105,14 +115,17 @@ on the shared `gobgp-net` bridge with static IP 172.19.0.10.
 
 - **Image:** `osrg/gobgp:latest`
 - **Config:** `gobgp/gobgpd.toml` — local AS 65000, router ID 172.19.0.10,
-  neighbors 172.19.0.4 and 172.19.0.3 (both AS 65001), accept-all policy
+  neighbors 172.19.0.4 and 172.19.0.3 (both AS 65001), accept-all policy,
+  TCP MD5 `auth-password` on each peer
 - **gRPC API:** exposed on `:50051`
 - **Lifecycle:** `make gobgp-up` / `make gobgp-down`
 
 Cilium BGP configuration is applied via `manifests/cilium-bgp.yaml`:
-- `CiliumBGPPeerConfig/gobgp-default` — peer settings + `families[ipv4].advertisements.matchLabels: {advertise: bgp}`
+- `CiliumBGPPeerConfig/gobgp-default` — peer settings + `authSecretRef: gobgp-auth`
+  (TCP MD5) + `families[ipv4].advertisements.matchLabels: {advertise: bgp}`
 - `CiliumBGPClusterConfig/gobgp-bgp` — AS 65001, peer 172.19.0.10:179 AS 65000
 - `CiliumBGPAdvertisement/gobgp-advert` — labelled `advertise: bgp`, advertises PodCIDR + Service LoadBalancerIP
+- k8s Secret `gobgp-auth` in `kube-system` (key `password`) — created by `make gobgp-auth-secret`
 
 NOTE: Without `families[].advertisements.matchLabels` on the PeerConfig matching the
 Advertisement's labels, no routes are advertised even if BGP sessions are established.

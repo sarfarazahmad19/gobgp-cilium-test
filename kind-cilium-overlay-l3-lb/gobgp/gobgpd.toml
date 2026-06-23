@@ -17,6 +17,9 @@
   [neighbors.config]
     neighbor-address = "172.19.0.4"
     peer-as = 65001
+    # TCP MD5 (RFC 2385) — must match authSecretRef on the Cilium side.
+    # See manifests/cilium-bgp.yaml and scripts/auth.sh for the matching k8s secret.
+    auth-password = "gobgp-md5-secret-2026"
   # Accept PodCIDR and Service LoadBalancer routes advertised by Cilium
   [[neighbors.afi-safis]]
     [neighbors.afi-safis.config]
@@ -33,6 +36,9 @@
   [neighbors.config]
     neighbor-address = "172.19.0.3"
     peer-as = 65001
+    # TCP MD5 (RFC 2385) — must match authSecretRef on the Cilium side.
+    # See manifests/cilium-bgp.yaml and scripts/auth.sh for the matching k8s secret.
+    auth-password = "gobgp-md5-secret-2026"
   [[neighbors.afi-safis]]
     [neighbors.afi-safis.config]
       afi-safi-name = "ipv4-unicast"

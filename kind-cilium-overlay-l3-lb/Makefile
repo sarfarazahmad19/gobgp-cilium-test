@@ -35,15 +35,20 @@ net-rm: ## Remove the gobgp-net docker network
 
 ## ---- cluster lifecycle -----------------------------------------------
 
-.PHONY: up down status ps logs
+.PHONY: up cluster-up down status ps logs
 
-up: net-create ## Bring up the kind cluster (creates cluster + attaches to gobgp-net)
+up: cluster-up cilium-install gobgp-auth-secret gobgp-apply gobgp-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + speaker
+	@echo
+	@echo "all up. kubeconfig: $(KUBECONFIG)"
+	@echo "export KUBECONFIG=$(KUBECONFIG)"
+
+cluster-up: net-create ## Bring up just the kind cluster (attaches to gobgp-net)
 	docker compose run --rm kind
 	@echo
 	@echo "kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
 
-down: ## Tear down the kind cluster
+down: gobgp-down ## Tear down the kind cluster (also stops the gobgp speaker)
 	docker compose run --rm kind sh /config/scripts/kind-down.sh
 
 status: ## Show cluster status (nodes, pods, networks)
@@ -75,7 +80,9 @@ hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 
 ## ---- gobgp ----------------------------------------------------------
 
-.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes
+BGP_AUTH_PASSWORD ?= gobgp-md5-secret-2026
+
+.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret
 
 gobgp-up: net-create ## Start the GoBGP speaker container (background)
 	@echo "starting gobgp speaker..."
@@ -89,6 +96,13 @@ gobgp-down: ## Stop the GoBGP speaker container
 gobgp-apply: ## Apply Cilium BGP CRDs (peer config + cluster config + advertisement)
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-bgp.yaml
 	kubectl --kubeconfig $(KUBECONFIG) wait --for=condition=established crd/ciliumbgpclusterconfigs.cilium.io --timeout=30s || true
+
+gobgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
+	@echo "creating secret gobgp-auth in kube-system (BGP TCP MD5 password)"
+	kubectl --kubeconfig $(KUBECONFIG) create secret generic gobgp-auth \
+	  -n kube-system \
+	  --from-literal=password=$(BGP_AUTH_PASSWORD) \
+	  --dry-run=client -o yaml | kubectl --kubeconfig $(KUBECONFIG) apply -f -
 
 gobgp-status: ## Show GoBGP neighbor state
 	@docker exec gobgp-speaker /go/bin/gobgp neighbor 2>/dev/null || \

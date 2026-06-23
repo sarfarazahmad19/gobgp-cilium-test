@@ -65,24 +65,16 @@ Install kind: https://kind.sigs.k8s.io/docs/user/quick-start/#installation
 ## Quick start
 
 ```sh
-# 1. Start the cluster (creates network + nodes + kubeconfig)
+# Bring up the full lab (cluster + Cilium + BGP auth secret + CRDs + GoBGP speaker)
 make up
 
-# 2. Install Cilium (CNI, BGP CP, Hubble)
-make cilium-install
-
-# 3. Check everything is healthy
+# Check it's all healthy
 make status
 make cilium-status
-
-# 4. Start GoBGP speaker + apply BGP config
-make gobgp-up
-make gobgp-apply
-
-# 5. Verify BGP peering
 make gobgp-status
+make gobgp-routes
 
-# 6. Open Hubble UI
+# Open Hubble UI
 make hubble-ui
 # Visit http://localhost:12000
 ```
@@ -90,8 +82,9 @@ make hubble-ui
 ## Make targets
 
 ```
-  make up              Bring up the kind cluster (idempotent)
-  make down            Tear down the kind cluster
+  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + speaker
+  make cluster-up      Bring up just the kind cluster (no cilium/gobgp)
+  make down            Tear down the kind cluster (also stops gobgp speaker)
   make status          Show cluster nodes, containers, networks
   make ps              Show running containers
   make logs            Tail controller logs
@@ -103,13 +96,14 @@ make hubble-ui
   make gobgp-up        Start the GoBGP speaker (background)
   make gobgp-down      Stop and remove the GoBGP speaker
   make gobgp-apply     Apply Cilium BGP CRDs to the cluster
+  make gobgp-auth-secret  Create/update the k8s TCP MD5 secret
   make gobgp-status    Show GoBGP neighbor state
   make gobgp-routes    Show routes learned by GoBGP
 
   make net-create      Create the shared gobgp-net network
   make net-rm          Remove the shared network
 
-  make clean           Tear down cluster + remove network
+  make clean           Tear down cluster + remove network + wipe kubeconfig
   make kubeconfig      Print path to kubeconfig
 ```
 

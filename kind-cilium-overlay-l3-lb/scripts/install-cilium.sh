@@ -10,7 +10,7 @@ CILIUM_VERSION="${CILIUM_VERSION:-1.19.5}"
 log() { printf "[install-cilium] %s\n" "$*"; }
 
 if [ ! -f "$KUBECONFIG" ]; then
-  echo "ERROR: kubeconfig not found at $KUBECONFIG — run \`make up\` first" >&2
+  echo "ERROR: kubeconfig not found at $KUBECONFIG — run \`make cluster-up\` first" >&2
   exit 1
 fi
 

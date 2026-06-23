@@ -5,8 +5,9 @@ name: gobgp-kind-cilium
 # service "up".  The kind node containers end up on the shared gobgp-net
 # network (see scripts/kind-up.sh).
 #
-# Use `make up` (not `docker compose up` directly) so the kind-up script
-# runs and the kubeconfig is written to ./.kubeconfig/kubeconfig.yaml.
+# Use `make cluster-up` (or `make up` for the full bring-up) instead of
+# `docker compose up` directly so the kind-up script runs and the kubeconfig
+# is written to ./.kubeconfig/kubeconfig.yaml.
 
 services:
   kind:
