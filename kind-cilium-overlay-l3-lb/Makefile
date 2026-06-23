@@ -4,6 +4,7 @@ SHELL := /bin/sh
 CLUSTER_NAME      ?= gobgp
 CP_CONTAINER      ?= gobgp-control-plane
 NETWORK_NAME      ?= gobgp-net
+KIND_NETWORK      ?= gobgp-kind
 KUBECONFIG        ?= $(PWD)/.kubeconfig/kubeconfig.yaml
 KIND_IMAGE        ?= kindest/node:v1.33.0
 CILIUM_VERSION    ?= 1.19.5
@@ -13,6 +14,7 @@ HELM_BIN          ?= helm
 export KUBECONFIG
 export CP_CONTAINER
 export NETWORK_NAME
+export KIND_NETWORK
 export CILIUM_VERSION
 
 .PHONY: help
@@ -22,16 +24,23 @@ help: ## Show this help
 ## ---- network ---------------------------------------------------------
 
 .PHONY: net-create net-rm
-net-create: ## Create the gobgp-net docker network (idempotent)
+net-create: ## Create docker networks (idempotent)
 	@if docker network inspect $(NETWORK_NAME) >/dev/null 2>&1; then \
 	  echo "network $(NETWORK_NAME) already exists"; \
 	else \
 	  docker network create --driver bridge $(NETWORK_NAME); \
 	  echo "created network $(NETWORK_NAME)"; \
 	fi
+	@if docker network inspect $(KIND_NETWORK) >/dev/null 2>&1; then \
+	  echo "network $(KIND_NETWORK) already exists"; \
+	else \
+	  docker network create --driver bridge $(KIND_NETWORK); \
+	  echo "created network $(KIND_NETWORK)"; \
+	fi
 
-net-rm: ## Remove the gobgp-net docker network
+net-rm: ## Remove both docker networks (gobgp-net + kind cluster bridge)
 	docker network rm $(NETWORK_NAME) 2>/dev/null || true
+	docker network rm $(KIND_NETWORK) 2>/dev/null || true
 
 ## ---- cluster lifecycle -----------------------------------------------
 
@@ -42,14 +51,14 @@ up: cluster-up cilium-install gobgp-auth-secret gobgp-apply gobgp-up ## Full bri
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
 
-cluster-up: net-create ## Bring up just the kind cluster (attaches to gobgp-net)
+cluster-up: net-create ## Bring up just the kind cluster (attaches to gobgp-net via kind-up.sh)
 	docker compose run --rm kind
 	@echo
 	@echo "kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
 
 down: gobgp-down ## Tear down the kind cluster (also stops the gobgp speaker)
-	docker compose run --rm kind sh /config/scripts/kind-down.sh
+	$(KIND_BIN) delete cluster --name $(CLUSTER_NAME) || true
 
 status: ## Show cluster status (nodes, pods, networks)
 	@$(KIND_BIN) get nodes --name $(CLUSTER_NAME) 2>/dev/null || echo "no kind cluster"

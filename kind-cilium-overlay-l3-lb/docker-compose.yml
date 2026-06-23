@@ -37,6 +37,7 @@ services:
       - gobgp-net
     environment:
       - NETWORK_NAME=gobgp-net
+      - KIND_NETWORK=gobgp-kind
       - KUBECONFIG_OUT=/data/kubeconfig.yaml
     restart: "no"
 

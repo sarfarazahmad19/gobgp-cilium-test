@@ -5,9 +5,9 @@ Plane, peered with an external BGP speaker over a shared Docker network.
 
 ```mermaid
 flowchart LR
-    subgraph gobgp_net["gobgp-net (172.19.0.0/16)"]
-        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001<br/>kind: 172.18.0.4<br/>PodCIDR: 10.244.0.0/24"]
-        wk["gobgp-worker<br/>172.19.0.4 / AS 65001<br/>kind: 172.18.0.3<br/>PodCIDR: 10.244.1.0/24"]
+    subgraph bgp_net["gobgp-net (172.19.0.0/16)"]
+        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001<br/>PodCIDR: 10.244.0.0/24"]
+        wk["gobgp-worker<br/>172.19.0.4 / AS 65001<br/>PodCIDR: 10.244.1.0/24"]
         sp["gobgp-speaker<br/>172.19.0.10 / AS 65000<br/>GoBGP daemon<br/>gRPC API :50051"]
     end
 
@@ -89,19 +89,20 @@ make hubble-ui
 ## Network layout
 
 ```
-  Docker networks:
-    gobgp-net      172.19.0.0/16  Shared bridge for BGP peering
-    kind           172.18.0.0/16  Default kind network
-
   Port forwards:
     localhost:6443  →  kube-apiserver
     localhost:12000 →  Hubble UI
     localhost:50051 →  GoBGP gRPC API
 
+  Docker networks:
+    gobgp-kind     172.18.0.0/16  Dedicated bridge for cluster management
+                                  (isolated from other kind clusters)
+    gobgp-net      172.19.0.0/16  Shared bridge for BGP peering
+
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
 
-  BGP:
+  BGP participants (all on gobgp-net):
     gobgp-control-plane  172.19.0.3  AS 65001  PodCIDR: 10.244.0.0/24
     gobgp-worker         172.19.0.4  AS 65001  PodCIDR: 10.244.1.0/24
     gobgp-speaker        172.19.0.10 AS 65000
@@ -110,8 +111,10 @@ make hubble-ui
 ## BGP peering
 
 Cilium's BGP Control Plane on each node peers with the GoBGP speaker over
-the shared `gobgp-net` L2 bridge. The speaker learns PodCIDR routes and
-stores them in its RIB (Routing Information Base):
+the shared `gobgp-net` L2 bridge. Each kind cluster gets its own Docker
+bridge (this one uses `gobgp-kind`) to avoid L2 exposure to other clusters
+on the host. The speaker learns PodCIDR routes and stores them in its RIB
+(Routing Information Base):
 
 ```
 GoBGP RIB (current):

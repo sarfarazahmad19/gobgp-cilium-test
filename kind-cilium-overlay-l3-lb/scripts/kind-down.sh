@@ -3,6 +3,10 @@
 # docker-compose / external user) so it can be reused by other stacks.
 set -eu
 
+# Install deps in case we're running via `docker compose run` (bypasses
+# the compose file's `command` which includes apk add).
+apk add --no-cache docker-cli bash >/dev/null 2>&1 || true
+
 CLUSTER_NAME="gobgp"
 
 log() { printf "[kind-down] %s\n" "$*"; }

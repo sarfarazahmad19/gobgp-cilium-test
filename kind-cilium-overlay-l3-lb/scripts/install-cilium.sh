@@ -6,6 +6,7 @@ set -eu
 KUBECONFIG="${KUBECONFIG:-./.kubeconfig/kubeconfig.yaml}"
 CP_CONTAINER="${CP_CONTAINER:-gobgp-control-plane}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.19.5}"
+KIND_NETWORK="${KIND_NETWORK:-gobgp-kind}"
 
 log() { printf "[install-cilium] %s\n" "$*"; }
 
@@ -14,10 +15,10 @@ if [ ! -f "$KUBECONFIG" ]; then
   exit 1
 fi
 
-# Resolve the control-plane IP on kind's default network. cilium needs
-# this to reach the kube-apiserver before any Service IP routing is up.
+# Resolve the control-plane IP on the cluster's dedicated Docker bridge.
+# Cilium uses this to reach the kube-apiserver before any Service IP routing is up.
 CP_IP=$(docker inspect "$CP_CONTAINER" \
-  --format '{{.NetworkSettings.Networks.kind.IPAddress}}' 2>/dev/null || true)
+  --format "{{index .NetworkSettings.Networks \"$KIND_NETWORK\" \"IPAddress\"}}" 2>/dev/null || true)
 if [ -z "$CP_IP" ]; then
   echo "ERROR: could not resolve IP of control-plane container '$CP_CONTAINER'" >&2
   exit 1

@@ -15,7 +15,7 @@ Service LoadBalancer IPs and Pod CIDRs.
              │                                                      │
     gobgp-control-plane     gobgp-worker         gobgp-speaker
     (kind node, K8s CP)    (kind node, worker)   (GoBGP daemon)
-    172.19.0.4              172.19.0.3           172.19.0.10
+    172.19.0.3              172.19.0.4           172.19.0.10
     AS 65001                AS 65001             AS 65000
     Cilium BGP CP          Cilium BGP CP
         │                       │                    │
@@ -42,7 +42,7 @@ Service LoadBalancer IPs and Pod CIDRs.
 | `docker-compose.yml` | Controller container + GoBGP speaker service |
 | `Makefile` | Day-to-day commands (`make up`, `make gobgp-up`, etc.) |
 | `scripts/kind-up.sh` | Creates cluster, attaches nodes to `gobgp-net`, exports kubeconfig |
-| `scripts/kind-down.sh` | Deletes cluster (leaves `gobgp-net` intact) |
+| `scripts/kind-down.sh` | Deletes cluster (leaves networks intact) |
 | `scripts/install-cilium.sh` | Helm-installs Cilium with BGP+Hubble, resolves CP IP from Docker |
 | `gobgp/gobgpd.toml` | GoBGP speaker config (AS 65000, peers to both nodes) |
 | `manifests/cilium-bgp.yaml` | Cilium BGP CRDs (peer config, cluster config, advertisement) |
@@ -75,8 +75,9 @@ make clean               # down + remove gobgp-net + wipe kubeconfig
 ## Cilium install details
 
 The install script (`scripts/install-cilium.sh`) resolves the control-plane
-container's IP on the Docker `kind` network and passes it as `k8sServiceHost`
-so Cilium can reach the apiserver before Service IP routing is up.
+container's IP on the Docker `gobgp-kind` network and passes it as
+`k8sServiceHost` so Cilium can reach the apiserver before Service IP routing
+is up.
 
 Cilium Helm values used:
 ```
@@ -91,9 +92,10 @@ bpf.masquerade=true
 
 ## Network
 
-- `kind` network: default Docker network kind creates for the cluster
-- `gobgp-net`: shared external bridge network for connecting BGP peers
-  (created on first `make up`, survives cluster teardown — removed by
+- `gobgp-kind`: dedicated Docker bridge for this cluster's management traffic
+  (isolated from other kind clusters; created by `net-create` / `kind-up.sh`)
+- `gobgp-net`: shared external bridge for BGP peering (172.19.0.0/16)
+  (created by `net-create`, survives cluster teardown — removed by
   `make clean`)
 - Pod CIDR: `10.244.0.0/16`
 - Service CIDR: `10.96.0.0/16`

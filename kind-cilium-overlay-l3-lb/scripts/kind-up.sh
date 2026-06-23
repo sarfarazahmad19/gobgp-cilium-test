@@ -6,9 +6,14 @@ set -eu
 
 CLUSTER_NAME="gobgp"
 NETWORK_NAME="${NETWORK_NAME:-gobgp-net}"
+KIND_NETWORK="${KIND_NETWORK:-gobgp-kind}"
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-/data/kubeconfig.yaml}"
 
 log() { printf "[kind-up] %s\n" "$*"; }
+
+# Install deps if running outside the normal compose command path (which
+# installs them before calling this script).  Idempotent on subsequent calls.
+apk add --no-cache docker-cli bash >/dev/null 2>&1 || true
 
 # Sanity: docker socket reachable?
 if ! docker info >/dev/null 2>&1; then
@@ -16,18 +21,20 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-# Make sure the target network exists (compose will create it on first up,
+# Make sure the BGP network exists (compose will create it on first up,
 # but running the script standalone is supported too).
 if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
   log "creating docker network $NETWORK_NAME"
   docker network create --driver bridge "$NETWORK_NAME" >/dev/null
 fi
 
-# Idempotent cluster creation.
+# Idempotent cluster creation — use the dedicated network for isolation from
+# other kind clusters on the host (they all default to the shared `kind` bridge).
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   log "cluster '$CLUSTER_NAME' already exists, skipping create"
 else
   log "creating cluster '$CLUSTER_NAME'"
+  export KIND_EXPERIMENTAL_DOCKER_NETWORK="$KIND_NETWORK"
   kind create cluster --config /config/kind.yaml --retain
 fi
 
