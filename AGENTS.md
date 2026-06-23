@@ -90,7 +90,7 @@ bpf.masquerade=true
 
 ## Conventions
 
-- No git commits exist yet — this is a greenfield project
+- `make` targets are the primary interface; prefer them over raw `docker compose` / `kubectl`
 - `make` targets are the primary interface; don't use `docker compose` directly
 - Scripts are idempotent (safe to re-run)
 - Shell scripts use `set -eu` (exit on error, undefined vars)
@@ -110,6 +110,9 @@ on the shared `gobgp-net` bridge with static IP 172.19.0.10.
 - **Lifecycle:** `make gobgp-up` / `make gobgp-down`
 
 Cilium BGP configuration is applied via `manifests/cilium-bgp.yaml`:
-- `CiliumBGPPeerConfig/gobgp-default` — default peer settings
+- `CiliumBGPPeerConfig/gobgp-default` — peer settings + `families[ipv4].advertisements.matchLabels: {advertise: bgp}`
 - `CiliumBGPClusterConfig/gobgp-bgp` — AS 65001, peer 172.19.0.10:179 AS 65000
-- `CiliumBGPAdvertisement/gobgp-advert` — PodCIDR + Service LoadBalancerIP
+- `CiliumBGPAdvertisement/gobgp-advert` — labelled `advertise: bgp`, advertises PodCIDR + Service LoadBalancerIP
+
+NOTE: Without `families[].advertisements.matchLabels` on the PeerConfig matching the
+Advertisement's labels, no routes are advertised even if BGP sessions are established.

@@ -155,9 +155,10 @@ and LoadBalancer Service IPs (so external traffic can hit K8s services).
 
 | Resource | Purpose |
 |----------|---------|
-| `CiliumBGPPeerConfig/gobgp-default` | Default peer transport/timer settings |
+| `CiliumBGPPeerConfig/gobgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
 | `CiliumBGPClusterConfig/gobgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
-| `CiliumBGPAdvertisement/gobgp-advert` | Advertise PodCIDR + Service LoadBalancerIP |
+| `CiliumBGPAdvertisement/gobgp-advert` | Labeled `advertise: bgp`; advertises PodCIDR + Service LoadBalancerIP |
+
 
 ### GoBGP config (`gobgp/gobgpd.toml`)
 
