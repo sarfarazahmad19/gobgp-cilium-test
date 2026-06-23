@@ -5,8 +5,8 @@
 #
 # Topology:
 #   GoBGP (AS 65000, 172.19.0.10)
-#     ├── peer → gobgp-control-plane 172.19.0.4  AS 65001
-#     └── peer → gobgp-worker         172.19.0.3  AS 65001
+#     ├── peer → gobgp-control-plane 172.19.0.3  AS 65001
+#     └── peer → gobgp-worker         172.19.0.4  AS 65001
 
 [global.config]
   as = 65000

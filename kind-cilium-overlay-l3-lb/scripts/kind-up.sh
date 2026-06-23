@@ -33,14 +33,37 @@ fi
 
 # Attach every node to the shared network so peer containers (gobgp, etc.)
 # can reach them on the same L2 segment. Tolerate already-attached state.
+# IPs are pinned here and must match the `neighbor-address` values in
+# gobgp/gobgpd.toml — keep both in sync.
+ip_for_node() {
+  case "$1" in
+    gobgp-control-plane) echo "172.19.0.3" ;;
+    gobgp-worker)        echo "172.19.0.4" ;;
+    *) log "WARN: no pinned IP for node '$1' on $NETWORK_NAME — using Docker DHCP" >&2
+       echo "" ;;
+  esac
+}
 for node in $(kind get nodes --name "$CLUSTER_NAME"); do
   if docker inspect "$node" \
       --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
       | tr ' ' '\n' | grep -qx "$NETWORK_NAME"; then
-    log "node '$node' already on $NETWORK_NAME"
+    actual=$(docker inspect "$node" --format "{{index .NetworkSettings.Networks \"$NETWORK_NAME\" \"IPAddress\"}}")
+    expected=$(ip_for_node "$node")
+    if [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
+      log "FATAL: node '$node' is on $NETWORK_NAME with IP $actual, expected $expected"
+      log "  run 'make down && make up' to recreate, or detach and re-attach manually"
+      exit 1
+    fi
+    log "node '$node' already on $NETWORK_NAME with IP $actual"
   else
-    log "attaching node '$node' to $NETWORK_NAME"
-    docker network connect "$NETWORK_NAME" "$node"
+    ip=$(ip_for_node "$node")
+    if [ -n "$ip" ]; then
+      log "attaching node '$node' to $NETWORK_NAME with pinned IP $ip"
+      docker network connect --ip "$ip" "$NETWORK_NAME" "$node"
+    else
+      log "attaching node '$node' to $NETWORK_NAME (Docker-assigned IP)"
+      docker network connect "$NETWORK_NAME" "$node"
+    fi
   fi
 done
 
