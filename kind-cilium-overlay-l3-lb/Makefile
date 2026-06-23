@@ -46,7 +46,7 @@ net-rm: ## Remove both docker networks (gobgp-net + kind cluster bridge)
 
 .PHONY: up cluster-up down status ps logs
 
-up: cluster-up cilium-install gobgp-auth-secret gobgp-apply lb-pool-apply gobgp-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker
+up: cluster-up cilium-install gobgp-auth-secret gobgp-apply lb-pool-apply frr-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker
 	@echo
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
@@ -57,7 +57,7 @@ cluster-up: net-create ## Bring up just the kind cluster (attaches to gobgp-net 
 	@echo "kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
 
-down: gobgp-down ## Tear down the kind cluster (also stops the gobgp speaker)
+down: frr-down ## Tear down the kind cluster (also stops the frr speaker)
 	$(KIND_BIN) delete cluster --name $(CLUSTER_NAME) || true
 
 status: ## Show cluster status (nodes, pods, networks)
@@ -87,20 +87,20 @@ cilium-status: ## Run cilium status
 hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 	kubectl -n kube-system port-forward svc/hubble-ui 12000:80
 
-## ---- gobgp ----------------------------------------------------------
+## ---- frr ------------------------------------------------------------
 
 BGP_AUTH_PASSWORD ?= gobgp-md5-secret-2026
 
-.PHONY: gobgp-up gobgp-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret lb-pool-apply
+.PHONY: frr-up frr-down gobgp-apply gobgp-status gobgp-routes gobgp-auth-secret lb-pool-apply
 
-gobgp-up: net-create ## Start the GoBGP speaker container (background)
-	@echo "starting gobgp speaker..."
-	docker compose up -d gobgp
-	@echo "gobgp gRPC API available at localhost:50051"
+frr-up: net-create ## Start the FRR BGP speaker container (background)
+	@echo "starting FRR BGP speaker..."
+	docker compose up -d frr
+	@echo "FRR vtysh available via: docker exec frr-speaker vtysh"
 
-gobgp-down: ## Stop the GoBGP speaker container
-	docker compose stop gobgp 2>/dev/null || true
-	docker compose rm -f gobgp 2>/dev/null || true
+frr-down: ## Stop the FRR BGP speaker container
+	docker compose stop frr 2>/dev/null || true
+	docker compose rm -f frr 2>/dev/null || true
 
 gobgp-apply: ## Apply Cilium BGP CRDs (peer config + cluster config + advertisement)
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-bgp.yaml
@@ -116,13 +116,13 @@ gobgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
 lb-pool-apply: ## Apply CiliumLoadBalancerIPPool for LB IPAM
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-lb-pool.yaml
 
-gobgp-status: ## Show GoBGP neighbor state
-	@docker exec gobgp-speaker /go/bin/gobgp neighbor 2>/dev/null || \
-	  echo "gobgp container not running — try 'make gobgp-up' first"
+frr-status: ## Show FRR BGP neighbor state
+	@docker exec frr-speaker vtysh -c "show bgp summary" 2>/dev/null || \
+	  echo "FRR container not running — try 'make frr-up' first"
 
-gobgp-routes: ## Show routes learned by GoBGP from Cilium peers
-	@docker exec gobgp-speaker /go/bin/gobgp global rib 2>/dev/null || \
-	  echo "gobgp container not running — try 'make gobgp-up' first"
+frr-routes: ## Show routes learned by FRR from Cilium peers
+	@docker exec frr-speaker vtysh -c "show bgp ipv4 unicast" 2>/dev/null || \
+	  echo "FRR container not running — try 'make frr-up' first"
 
 ## ---- debug ----------------------------------------------------------
 

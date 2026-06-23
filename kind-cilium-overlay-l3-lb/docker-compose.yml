@@ -41,28 +41,22 @@ services:
       - KUBECONFIG_OUT=/data/kubeconfig.yaml
     restart: "no"
 
-  # ---- GoBGP speaker ---------------------------------------------------
+  # ---- FRR BGP speaker -------------------------------------------------
   # Peers with Cilium's BGP Control Plane on each kind node via the
-  # shared gobgp-net L2 segment. Receives PodCIDR and Service LB routes.
-  gobgp:
-    image: docker.io/osrg/gobgp:latest
-    container_name: gobgp-speaker
-    entrypoint: /go/bin/gobgpd
-    command:
-      - -f
-      - /etc/gobgp/gobgpd.toml
-      - -t
-      - toml
-      - -l
-      - info
-      - --api-hosts=:50051
+  # shared gobgp-net L2 segment. Receives PodCIDR and Service LB routes
+  # and installs them into the kernel FIB (via zebra) for local reachability.
+  frr:
+    image: docker.io/frrouting/frr:latest
+    container_name: frr-speaker
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
     volumes:
-      - ./gobgp/gobgpd.toml:/etc/gobgp/gobgpd.toml:ro
+      - ./frr/daemons:/etc/frr/daemons:ro
+      - ./frr/frr.conf:/etc/frr/frr.conf:ro
     networks:
       gobgp-net:
         ipv4_address: 172.19.0.10
-    ports:
-      - "50051:50051"
     restart: unless-stopped
 
 networks:

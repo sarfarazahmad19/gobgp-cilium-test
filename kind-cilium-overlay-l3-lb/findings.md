@@ -21,7 +21,7 @@ Endpoints object. From Cilium's BGP control plane's perspective:
 - The BGP daemon does not check whether there are healthy backends before
   pushing the route.
 
-So GoBGP installs the route, traffic from outside is ECMP'd to both nodes,
+So FRR installs the route, traffic from outside is ECMP'd to both nodes,
 hits the kube-proxy replacement (Cilium eBPF), finds no backend, and is
 dropped/refused. BGP looks "up", the service is a black hole.
 
@@ -32,7 +32,7 @@ dropped/refused. BGP looks "up", the service is a black hole.
   kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml run test \
     --image=nginx --labels=app=test --port=80
   ```
-  Re-check `make gobgp-routes` and curl the VIP from `gobgp-net`.
+  Re-check `make frr-routes` and curl the VIP from `gobgp-net`.
 
 **How to make BGP honestly reflect endpoint health (advanced, optional):**
 - `externalTrafficPolicy: Local` on the Service: a node withdraws its route
@@ -50,18 +50,18 @@ this; this finding covers the endpoint-orthogonal side.
 ## F2. ECMP next-hops from both nodes is by design
 
 **What we saw:**
-- `docker exec gobgp-speaker /go/bin/gobgp global rib detailed` shows the
+- `docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"` shows the
   same Service prefix with two next-hops: `172.19.0.3` and `172.19.0.4`.
 
 **Why:** Every node in the cluster runs a Cilium BGP instance
 (`nodeSelector: {}` in `CiliumBGPClusterConfig/gobgp-bgp`), each peers with
-GoBGP at `172.19.0.10` AS 65000, and each advertises the same Service
-because the `CiliumBGPAdvertisement` has no per-node selector. GoBGP
+FRR at `172.19.0.10` AS 65000, and each advertises the same Service
+because the `CiliumBGPAdvertisement` has no per-node selector. FRR
 receives two equal-cost paths and installs both as ECMP next-hops.
 
 **When you DON'T want this:** set `externalTrafficPolicy: Local` on the
 Service. A node withdraws its advertisement when it has no local endpoint,
-so traffic only lands on a node that has a pod. From GoBGP's RIB the
+so traffic only lands on a node that has a pod. From FRR's RIB the
 route appears from one node only (the one with the local pod).
 
 **Related:** [F1](#f1-service-vip-is-advertised-by-bgp-even-when-no-endpoints-exist).
@@ -78,20 +78,19 @@ Three checks, in order of usefulness:
    # EXTERNAL-IP column should be 172.19.0.200-220, not <pending>
    ```
 
-2. **BGP session is established:**
-   ```sh
-   make gobgp-status
-   # Each neighbor's state should be "established"
-   ```
-   Or via gRPC: `gobgpctl -p 50051 neighbor`.
+ 2. **BGP session is established:**
+    ```sh
+    make frr-status
+    # Each neighbor's state should be "Established"
+    ```
 
-3. **Route is in GoBGP's RIB:**
-   ```sh
-   make gobgp-routes
-   # or: docker exec gobgp-speaker /go/bin/gobgp global rib
-   ```
-   Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
-   `gobgp-net` (`172.19.0.3` / `172.19.0.4`).
+ 3. **Route is in FRR's RIB:**
+    ```sh
+    make frr-routes
+    # or: docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"
+    ```
+    Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
+    `gobgp-net` (`172.19.0.3` / `172.19.0.4`).
 
 If 1 passes but 2 fails → Cilium BGP CP can't reach the speaker; check
 `authSecretRef` secret, TCP MD5 password match, and `gobgp-net` connectivity.

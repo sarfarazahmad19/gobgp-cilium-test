@@ -43,6 +43,8 @@ helm upgrade --install cilium cilium/cilium \
   --set ipam.mode=kubernetes \
   --set bpf.masquerade=true \
   --set bgpControlPlane.enabled=true \
+  --set devices='{eth0,eth1}' \
+  --set directRoutingDevice=eth0 \
   --wait \
   --timeout 5m
 
