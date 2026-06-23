@@ -64,9 +64,9 @@ make hubble-ui
 ## Make targets
 
 ```
-  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + speaker
+  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + speaker + test client
   make cluster-up      Bring up just the kind cluster (no cilium/frr)
-  make down            Tear down the kind cluster (also stops frr speaker)
+  make down            Tear down the kind cluster (also stops frr speaker and test client)
   make status          Show cluster nodes, containers, networks
   make ps              Show running containers
   make logs            Tail controller logs
@@ -83,8 +83,13 @@ make hubble-ui
   make frr-status      Show FRR BGP neighbor state (vtysh)
   make frr-routes      Show routes learned by FRR (RIB)
 
-  make net-create      Create the shared bgp-net network
-  make net-rm          Remove the shared network
+  make client-up       Start the test client (adds static routes on kind nodes)
+  make client-down     Stop the test client
+  make client-test     Curl the LB VIP from the test client
+  make client-route-add  Add static routes for client-net return path
+
+  make net-create      Create the shared bgp-net + client-net networks
+  make net-rm          Remove all networks
 
   make clean           Tear down cluster + remove network + wipe kubeconfig
   make kubeconfig      Print path to kubeconfig
@@ -510,6 +515,55 @@ has no local endpoint.
 The `CiliumBGPAdvertisement` has no `selector` field, so it matches every
 LoadBalancer service in the cluster — by design foot-gun for a multi-tenant
 cluster; fine for a lab.
+
+## Test client
+
+A permanent Alpine-based test client (`test-client`) lives on a separate
+subnet (`client-net`, 172.21.0.0/24) with FRR as its default gateway.
+This provides an isolated client outside `bgp-net` for realistic end-to-end
+testing.
+
+### Topology
+
+```
+client-net (172.21.0.0/24, Docker bridge)
+
+test-client (172.21.0.100/24, gw 172.21.0.10)
+       │
+       └── FRR speaker (172.21.0.10 eth1 + 172.19.0.10 eth0)
+                │ ip_forward=1
+                │
+                ├── Cilium node worker (172.19.0.4) AS 65001
+                └── Cilium node worker2 (172.19.0.5) AS 65001
+```
+
+Traffic flow:
+
+1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR)
+2. FRR forwards via BGP-learned route to one of the Cilium nodes
+3. Cilium's DSR+Geneve delivers to the backend pod
+4. Pod responds with the real client IP (DSR preserves it)
+5. Return path: pod → Cilium node → FRR (via static route) → client
+
+### Usage
+
+```sh
+make client-up        # Start the client (also adds routes on kind nodes)
+make client-down      # Stop the client
+make client-test      # curl the LB VIP from the client
+docker exec -it test-client sh  # Interactive shell
+```
+
+### Requirements
+
+For DSR return traffic, the kind nodes need a route to `client-net`:
+
+```sh
+docker exec overlay-l3-bgp-worker ip route add 172.21.0.0/24 via 172.19.0.10 dev eth1
+```
+
+This is handled automatically by `make client-up` (via the `client-route-add`
+target). The route is not persistent across node restarts.
 
 ## Cleanup
 

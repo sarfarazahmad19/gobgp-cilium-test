@@ -75,6 +75,16 @@ for node in $(kind get nodes --name "$CLUSTER_NAME"); do
   fi
 done
 
+# Add static route on every node for the client-net (DSR return path).
+# Without this, response packets from backend pods (sourced from real client
+# IP 172.21.0.0/24) would go out the default gateway instead of via FRR.
+CLIENT_NET_SUBNET="${CLIENT_NET_SUBNET:-172.21.0.0/24}"
+FRR_IP="${FRR_IP:-172.19.0.10}"
+for node in $(kind get nodes --name "$CLUSTER_NAME"); do
+  docker exec "$node" ip route replace "$CLIENT_NET_SUBNET" via "$FRR_IP" dev eth1 2>/dev/null || true
+done
+log "added static route for $CLIENT_NET_SUBNET via $FRR_IP on all nodes"
+
 # Always (re)write the kubeconfig so the host can pick it up. The
 # controller runs as root (it needs the docker socket), so we loosen
 # perms explicitly so the host user can read it.

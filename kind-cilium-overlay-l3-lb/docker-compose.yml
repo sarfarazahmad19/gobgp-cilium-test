@@ -45,20 +45,62 @@ services:
   # Peers with Cilium's BGP Control Plane on each kind node via the
   # shared bgp-net L2 segment. Receives PodCIDR and Service LB routes
   # and installs them into the kernel FIB (via zebra) for local reachability.
+  #
+  # Also acts as a router/gateway for the test-client container on the
+  # separate client-net. ip_forward is enabled so FRR can forward
+  # traffic between client-net and bgp-net.
   frr:
     image: docker.io/frrouting/frr:latest
     container_name: frr-speaker
     cap_add:
       - NET_ADMIN
       - SYS_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
     volumes:
       - ./frr/daemons:/etc/frr/daemons:ro
       - ./frr/frr.conf:/etc/frr/frr.conf:ro
     networks:
       bgp-net:
         ipv4_address: 172.19.0.10
+      client-net:
+        ipv4_address: 172.21.0.10
+    restart: unless-stopped
+
+  # ---- Test client -----------------------------------------------------
+  # Lives on client-net (172.21.0.0/24), a separate L2 segment from
+  # bgp-net. Default route is set in the entrypoint to 172.21.0.10
+  # (FRR) so it must use FRR as a router to reach the LB VIP
+  # 172.19.0.200 on bgp-net.
+  # Tests: FRR as gateway/router, kernel forwarding, DSR with a real
+  # client IP.
+  client:
+    image: docker.io/library/alpine:3.20
+    container_name: test-client
+    cap_add:
+      - NET_ADMIN
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache curl bind-tools iproute2
+        # Replace the Docker default route (172.21.0.1, the bridge) with
+        # a route via FRR (172.21.0.10) so all off-subnet traffic uses
+        # FRR as the gateway.
+        ip route del default via 172.21.0.1 2>/dev/null || true
+        ip route add default via 172.21.0.10 dev eth0
+        echo "test-client ready (default gw 172.21.0.10 = FRR)"
+        exec sleep infinity
+    networks:
+      client-net:
+        ipv4_address: 172.21.0.100
+    depends_on:
+      - frr
     restart: unless-stopped
 
 networks:
   bgp-net:
+    external: true
+  client-net:
     external: true
