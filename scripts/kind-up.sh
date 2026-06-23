@@ -1,0 +1,63 @@
+#!/bin/sh
+# Bring up the kind cluster (idempotent) and attach the node containers to
+# the shared gobgp-net network so sidecar services (e.g. gobgp) can reach
+# them on the same L2 segment.
+set -eu
+
+CLUSTER_NAME="gobgp"
+NETWORK_NAME="${NETWORK_NAME:-gobgp-net}"
+KUBECONFIG_OUT="${KUBECONFIG_OUT:-/data/kubeconfig.yaml}"
+
+log() { printf "[kind-up] %s\n" "$*"; }
+
+# Sanity: docker socket reachable?
+if ! docker info >/dev/null 2>&1; then
+  echo "ERROR: docker socket not reachable from inside controller" >&2
+  exit 1
+fi
+
+# Make sure the target network exists (compose will create it on first up,
+# but running the script standalone is supported too).
+if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+  log "creating docker network $NETWORK_NAME"
+  docker network create --driver bridge "$NETWORK_NAME" >/dev/null
+fi
+
+# Idempotent cluster creation.
+if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
+  log "cluster '$CLUSTER_NAME' already exists, skipping create"
+else
+  log "creating cluster '$CLUSTER_NAME'"
+  kind create cluster --config /config/kind.yaml --retain
+fi
+
+# Attach every node to the shared network so peer containers (gobgp, etc.)
+# can reach them on the same L2 segment. Tolerate already-attached state.
+for node in $(kind get nodes --name "$CLUSTER_NAME"); do
+  if docker inspect "$node" \
+      --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' \
+      | tr ' ' '\n' | grep -qx "$NETWORK_NAME"; then
+    log "node '$node' already on $NETWORK_NAME"
+  else
+    log "attaching node '$node' to $NETWORK_NAME"
+    docker network connect "$NETWORK_NAME" "$node"
+  fi
+done
+
+# Always (re)write the kubeconfig so the host can pick it up. The
+# controller runs as root (it needs the docker socket), so we loosen
+# perms explicitly so the host user can read it.
+log "exporting kubeconfig -> $KUBECONFIG_OUT"
+kind export kubeconfig --kubeconfig "$KUBECONFIG_OUT" --name "$CLUSTER_NAME"
+chmod 666 "$KUBECONFIG_OUT" 2>/dev/null || true
+
+# Wait for the control plane to be Ready.
+log "waiting for control-plane to be Ready"
+kubectl --kubeconfig "$KUBECONFIG_OUT" wait --for=condition=Ready \
+  --timeout=120s -n kube-system pod -l tier=control-plane >/dev/null 2>&1 \
+  || true
+
+log "cluster nodes:"
+kubectl --kubeconfig "$KUBECONFIG_OUT" get nodes -o wide 2>/dev/null || true
+
+log "done."

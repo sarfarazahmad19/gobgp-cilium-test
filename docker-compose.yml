@@ -1,0 +1,44 @@
+name: gobgp-kind-cilium
+
+# A tiny controller container runs `kind create cluster` against the host
+# docker socket, then keeps itself alive so docker-compose considers the
+# service "up".  The kind node containers end up on the shared gobgp-net
+# network (see scripts/kind-up.sh).
+#
+# Use `make up` (not `docker compose up` directly) so the kind-up script
+# runs and the kubeconfig is written to ./.kubeconfig/kubeconfig.yaml.
+
+services:
+  kind:
+    image: docker.io/library/alpine:3.20
+    container_name: kind-controller
+    privileged: true
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        apk add --no-cache docker-cli bash
+        exec /config/scripts/kind-up.sh
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the host's kind + helm binaries (and docker CLI from the
+      # host if available) into the controller so we don't need to bake
+      # them into the image.
+      - /usr/local/bin/kind:/usr/local/bin/kind:ro
+      - /usr/bin/helm:/usr/local/bin/helm:ro
+      - /usr/bin/kubectl:/usr/local/bin/kubectl:ro
+      - ./kind.yaml:/config/kind.yaml:ro
+      - ./scripts/kind-up.sh:/config/scripts/kind-up.sh:ro
+      - ./scripts/kind-down.sh:/config/scripts/kind-down.sh:ro
+      - ./.kubeconfig:/data
+    networks:
+      - gobgp-net
+    environment:
+      - NETWORK_NAME=gobgp-net
+      - KUBECONFIG_OUT=/data/kubeconfig.yaml
+    restart: "no"
+
+networks:
+  gobgp-net:
+    external: true
