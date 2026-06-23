@@ -3,41 +3,20 @@
 Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
 
-```
-                          Docker host
-  +-------------------------------------------------------------+
-  |                                                             |
-  |   gobgp-net (bridge, 172.19.0.0/16)                         |
-  |   +-------------------------------------------------------+ |
-  |   |                                                       | |
-  |   |   +-------------------+   +-------------------+       | |
-  |   |   | gobgp-control-    |   | gobgp-worker      |       | |
-  |   |   | plane             |   |                   |       | |
-  |   |   | 172.19.0.4        |   | 172.19.0.3        |       | |
-  |   |   |                   |   |                   |       | |
-  |   |   |   kind node       |   |   kind node       |       | |
-  |   |   |   K8s CP          |   |   K8s worker      |       | |
-  |   |   |   + Cilium agent  |   |   + Cilium agent  |       | |
-  |   |   |   + BGP (AS65001) |   |   + BGP (AS65001) |       | |
-  |   |   |                   |   |                   |       | |
-  |   |   +---------+---------+   +--------+----------+       | |
-  |   |             |                      |                  | |
-  |   |             |         BGP          |                  | |
-  |   |             +----------+-----------+                  | |
-  |   |                        |                              | |
-  |   |                   +----+------+                       | |
-  |   |                   | gobgp-    |                       | |
-  |   |                   | speaker   |                       | |
-  |   |                   | 172.19.0.10                       | |
-  |   |                   | AS 65000  |                       | |
-  |   |                   +-----------+                       | |
-  |   +-------------------------------------------------------+ |
-  |                                                             |
-  |   Port forwards:                                            |
-  |   localhost:6443  -->  kube-apiserver                       |
-  |   localhost:12000 -->  Hubble UI                            |
-  |   localhost:50051 -->  GoBGP gRPC API                       |
-  +-------------------------------------------------------------+
+```mermaid
+flowchart LR
+    subgraph gobgp_net["gobgp-net (172.19.0.0/16)"]
+        cp["gobgp-control-plane<br/>172.19.0.3 / AS 65001<br/>kind: 172.18.0.4<br/>PodCIDR: 10.244.0.0/24"]
+        wk["gobgp-worker<br/>172.19.0.4 / AS 65001<br/>kind: 172.18.0.3<br/>PodCIDR: 10.244.1.0/24"]
+        sp["gobgp-speaker<br/>172.19.0.10 / AS 65000<br/>GoBGP daemon<br/>gRPC API :50051"]
+    end
+
+    cp -- "BGP session (TCP :179, TCP MD5 auth) --> advertises 10.244.0.0/24" --- sp
+    wk -- "BGP session (TCP :179, TCP MD5 auth) --> advertises 10.244.1.0/24" --- sp
+
+    style cp fill:#c9e6ff
+    style wk fill:#c9e6ff
+    style sp fill:#ffe6cc
 ```
 
 ## What this does
@@ -110,40 +89,35 @@ make hubble-ui
 ## Network layout
 
 ```
-  Host:127.0.0.1:6443  ---- kube-apiserver (in gobgp-control-plane)
-  Host:127.0.0.1:12000 ---- Hubble UI (port-forward)
-  Host:127.0.0.1:50051 ---- GoBGP gRPC API
-
   Docker networks:
     gobgp-net      172.19.0.0/16  Shared bridge for BGP peering
-    kind           (internal)     Default kind network
+    kind           172.18.0.0/16  Default kind network
+
+  Port forwards:
+    localhost:6443  →  kube-apiserver
+    localhost:12000 →  Hubble UI
+    localhost:50051 →  GoBGP gRPC API
 
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
 
   BGP:
-    GoBGP speaker:  172.19.0.10  AS 65000
-    Cilium (all nodes):          AS 65001
+    gobgp-control-plane  172.19.0.3  AS 65001  PodCIDR: 10.244.0.0/24
+    gobgp-worker         172.19.0.4  AS 65001  PodCIDR: 10.244.1.0/24
+    gobgp-speaker        172.19.0.10 AS 65000
 ```
 
 ## BGP peering
 
 Cilium's BGP Control Plane on each node peers with the GoBGP speaker over
-the shared `gobgp-net` L2 bridge:
+the shared `gobgp-net` L2 bridge. The speaker learns PodCIDR routes and
+stores them in its RIB (Routing Information Base):
 
 ```
-  AS 65001 (Cilium)                       AS 65000 (GoBGP)
-  +----------+
-  | CP node  |---172.19.0.4:179---+
-  +----------+                    |
-                          +-------+--------+
-  +----------+            | gobgp-speaker  |
-  | worker   |---172.19.0.3:179---+        |
-  +----------+            +----------------+
+GoBGP RIB (current):
+  10.244.0.0/24 → 172.19.0.3  AS 65001    (gobgp-control-plane)
+  10.244.1.0/24 → 172.19.0.4  AS 65001    (gobgp-worker)
 ```
-
-The GoBGP speaker learns PodCIDR routes (so external routers can reach pods)
-and LoadBalancer Service IPs (so external traffic can hit K8s services).
 
 ### Manifests (`manifests/cilium-bgp.yaml`)
 
@@ -156,8 +130,9 @@ and LoadBalancer Service IPs (so external traffic can hit K8s services).
 
 ### GoBGP config (`gobgp/gobgpd.toml`)
 
-Local AS 65000, router ID 172.19.0.10. Two neighbors: 172.19.0.4 and
-172.19.0.3, both AS 65001. Default accept policy for import and export.
+Local AS 65000, router ID 172.19.0.10. Two neighbors: 172.19.0.3
+(gobgp-control-plane) and 172.19.0.4 (gobgp-worker), both AS 65001, TCP MD5
+auth enabled. Default accept policy for import and export.
 
 ## Cluster details
 
