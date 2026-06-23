@@ -55,13 +55,15 @@ spec:
       labels:
         app: test
     spec:
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app: test
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: test
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: httpbin
           image: mccutchen/go-httpbin:latest
