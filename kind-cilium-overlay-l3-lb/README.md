@@ -160,10 +160,10 @@ make gobgp-routes
 ```
 
 The route is advertised even without matching pods — BGP is "up" but traffic
-blackholes until pods exist. Create matching pods with:
-```sh
-kubectl run test --image=nginx --labels=app=test --port=80
-```
+blackholes until pods exist. The Deployment bundled in the same manifest
+creates nginx pods that match the Service selector, so the full path works
+immediately after `kubectl apply`.
+
 See [`findings.md`](findings.md) for ECMP behavior and endpoint health details.
 
 ## Cluster details

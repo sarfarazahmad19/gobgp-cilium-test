@@ -13,15 +13,14 @@
 #   make gobgp-routes
 #   docker exec gobgp-speaker /go/bin/gobgp global rib
 #
-# Notes:
-# - The `app: test` selector targets pods you'd create separately
-#   (e.g. `kubectl run test --image=nginx --labels=app=test --port=80`).
-# - Without matching pods, the BGP route is still advertised (Cilium
-#   advertises the Service VIP regardless of endpoint state). End-to-end
-#   connectivity requires the pods to exist and be Ready.
-# - `externalTrafficPolicy: Cluster` (default) → all nodes advertise the
-#   route (ECMP from GoBGP's POV). Switch to `Local` to withdraw the
-#   route from nodes with no local endpoint.
+# The Deployment below creates nginx pods matching the `app: test` selector,
+# so applying this file gives you a working end-to-end setup. Without
+# matching pods, the BGP route is still advertised (Cilium advertises
+# the VIP regardless of endpoint state), but traffic blackholes.
+#
+# `externalTrafficPolicy: Cluster` (default) → all nodes advertise the
+# route (ECMP from GoBGP's POV). Switch to `Local` to withdraw the
+# route from nodes with no local endpoint.
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,3 +36,27 @@ spec:
       port: 80
       targetPort: 80
       protocol: TCP
+
+---
+# Backend pods for the test-lb Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-lb
+  labels:
+    app: test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
