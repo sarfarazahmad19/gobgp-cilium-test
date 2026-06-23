@@ -44,7 +44,10 @@ helm upgrade --install cilium cilium/cilium \
   --set bpf.masquerade=true \
   --set bgpControlPlane.enabled=true \
   --set devices='{eth0,eth1}' \
-  --set directRoutingDevice=eth0
+  --set directRoutingDevice=eth0 \
+  --set loadBalancer.mode=dsr \
+  --set loadBalancer.dsrDispatch=geneve \
+  --set tunnelProtocol=geneve
 
 log "waiting for cilium daemonset to be ready"
 kubectl --kubeconfig "$KUBECONFIG" -n kube-system rollout status ds/cilium --timeout=180s
