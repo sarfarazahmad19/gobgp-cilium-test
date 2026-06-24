@@ -41,15 +41,34 @@ services:
       - KUBECONFIG_OUT=/data/kubeconfig.yaml
     restart: "no"
 
-  # ---- FRR BGP speaker -------------------------------------------------
+  # ---- FRR1 TOR-Client ------------------------------------------
+  # Serves as the default gateway for the test client on client-net.
+  # Peers with FRR2 (TOR-Cluster) via eBGP over a dedicated transit L2 segment.
+  # NOT on bgp-net — only reaches the K8s cluster through FRR2.
+  frr1:
+    image: docker.io/frrouting/frr:latest
+    container_name: frr-speaker-tor
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    sysctls:
+      - net.ipv4.ip_forward=1
+    volumes:
+      - ./frr/daemons:/etc/frr/daemons:ro
+      - ./frr/frr1.conf:/etc/frr/frr.conf:ro
+    networks:
+      transit-net:
+        ipv4_address: 172.23.0.1
+      client-net:
+        ipv4_address: 172.21.0.10
+    restart: unless-stopped
+
+  # ---- FRR2 TOR-Cluster (BGP peer with Cilium) ------------------------------
   # Peers with Cilium's BGP Control Plane on each kind node via the
-  # shared bgp-net L2 segment. Receives PodCIDR and Service LB routes
-  # and installs them into the kernel FIB (via zebra) for local reachability.
-  #
-  # Also acts as a router/gateway for the test-client container on the
-  # separate client-net. ip_forward is enabled so FRR can forward
-  # traffic between client-net and bgp-net.
-  frr:
+  # dedicated server L2 segment (bgp-net). Peers with FRR1 (TOR-Client) over
+  # the transit L2 segment. Uses next-hop-self so all traffic flows
+  # through this TOR-Cluster router.
+  frr2:
     image: docker.io/frrouting/frr:latest
     container_name: frr-speaker
     cap_add:
@@ -63,8 +82,8 @@ services:
     networks:
       bgp-net:
         ipv4_address: 172.19.0.10
-      client-net:
-        ipv4_address: 172.21.0.10
+      transit-net:
+        ipv4_address: 172.23.0.2
     restart: unless-stopped
 
   # ---- Test client -----------------------------------------------------
@@ -96,11 +115,13 @@ services:
       client-net:
         ipv4_address: 172.21.0.100
     depends_on:
-      - frr
+      - frr1
     restart: unless-stopped
 
 networks:
   bgp-net:
     external: true
   client-net:
+    external: true
+  transit-net:
     external: true

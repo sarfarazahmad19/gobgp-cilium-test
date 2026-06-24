@@ -5,6 +5,7 @@ CLUSTER_NAME      ?= overlay-l3-bgp
 CP_CONTAINER      ?= overlay-l3-bgp-control-plane
 NETWORK_NAME      ?= bgp-net
 CLIENT_NETWORK    ?= client-net
+TRANSIT_NETWORK   ?= transit-net
 KIND_NETWORK      ?= bgp-kind
 KUBECONFIG        ?= $(PWD)/.kubeconfig/kubeconfig.yaml
 KIND_IMAGE        ?= kindest/node:v1.33.0
@@ -16,6 +17,7 @@ export KUBECONFIG
 export CP_CONTAINER
 export NETWORK_NAME
 export CLIENT_NETWORK
+export TRANSIT_NETWORK
 export KIND_NETWORK
 export CILIUM_VERSION
 
@@ -45,17 +47,24 @@ net-create: ## Create docker networks (idempotent)
 	  docker network create --driver bridge --subnet 172.21.0.0/24 --gateway 172.21.0.1 $(CLIENT_NETWORK); \
 	  echo "created network $(CLIENT_NETWORK) (gateway 172.21.0.1, FRR at 172.21.0.10)"; \
 	fi
+	@if docker network inspect $(TRANSIT_NETWORK) >/dev/null 2>&1; then \
+	  echo "network $(TRANSIT_NETWORK) already exists"; \
+	else \
+	  docker network create --driver bridge --subnet 172.23.0.0/24 --gateway 172.23.0.254 $(TRANSIT_NETWORK); \
+	  echo "created network $(TRANSIT_NETWORK) (172.23.0.0/24, gw 172.23.0.254)"; \
+	fi
 
-net-rm: ## Remove all docker networks (bgp-net + client-net + kind cluster bridge)
+net-rm: ## Remove all docker networks (bgp-net + client-net + transit-net + kind bridge)
 	docker network rm $(NETWORK_NAME) 2>/dev/null || true
 	docker network rm $(CLIENT_NETWORK) 2>/dev/null || true
+	docker network rm $(TRANSIT_NETWORK) 2>/dev/null || true
 	docker network rm $(KIND_NETWORK) 2>/dev/null || true
 
 ## ---- cluster lifecycle -----------------------------------------------
 
 .PHONY: up cluster-up down status ps logs cilium-uninstall
 
-up: cluster-up cilium-uninstall cilium-install bgp-auth-secret bgp-apply lb-pool-apply frr-up client-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + speaker + test client
+up: cluster-up cilium-uninstall cilium-install bgp-auth-secret bgp-apply lb-pool-apply frr-up client-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + both FRR speakers + test client
 	@echo
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
@@ -105,21 +114,47 @@ BGP_AUTH_PASSWORD ?= bgp-md5-secret-2026
 
 .PHONY: frr-up frr-down client-up client-down client-route-add client-test bgp-apply bgp-auth-secret lb-pool-apply
 
-frr-up: net-create ## Start the FRR BGP speaker container (background)
-	@echo "starting FRR BGP speaker..."
-	docker compose up -d frr
-	@echo "FRR vtysh available via: docker exec frr-speaker vtysh"
+FRR2_CONTAINER  ?= frr-speaker
+FRR1_CONTAINER  ?= frr-speaker-tor
 
-frr-down: ## Stop the FRR BGP speaker container
-	docker compose stop frr 2>/dev/null || true
-	docker compose rm -f frr 2>/dev/null || true
+.PHONY: frr-up frr1-up frr2-up frr-down frr1-down frr2-down
+.PHONY: client-up client-down client-test client-route-add
+.PHONY: bgp-apply bgp-auth-secret lb-pool-apply
 
-client-up: net-create frr-up client-route-add ## Start the test client (depends on FRR for connectivity)
+frr-up: net-create ## Start both FRR speakers (TOR + border)
+	@echo "starting FRR speakers (TOR + border)..."
+	docker compose up -d frr1 frr2
+	@echo "FRR border vtysh: docker exec $(FRR2_CONTAINER) vtysh"
+	@echo "FRR TOR vtysh:    docker exec $(FRR1_CONTAINER) vtysh"
+
+frr1-up: net-create ## Start the FRR TOR speaker
+	@echo "starting FRR TOR..."
+	docker compose up -d frr1
+	@echo "FRR TOR vtysh: docker exec $(FRR1_CONTAINER) vtysh"
+
+frr2-up: net-create ## Start the FRR border speaker
+	@echo "starting FRR border..."
+	docker compose up -d frr2
+	@echo "FRR border vtysh: docker exec $(FRR2_CONTAINER) vtysh"
+
+frr-down: ## Stop both FRR speakers
+	docker compose stop frr1 frr2 2>/dev/null || true
+	docker compose rm -f frr1 frr2 2>/dev/null || true
+
+frr1-down: ## Stop the FRR TOR speaker
+	docker compose stop frr1 2>/dev/null || true
+	docker compose rm -f frr1 2>/dev/null || true
+
+frr2-down: ## Stop the FRR border speaker
+	docker compose stop frr2 2>/dev/null || true
+	docker compose rm -f frr2 2>/dev/null || true
+
+client-up: net-create frr1-up client-route-add ## Start the test client (depends on FRR1 TOR for gateway)
 	@echo "starting test client..."
 	docker compose up -d client
 	@echo "test-client shell: docker exec -it test-client sh"
 
-client-route-add: ## Add static routes on kind nodes for 172.21.0.0/24 via FRR (needed for DSR return path)
+client-route-add: ## Add static routes on kind nodes for 172.21.0.0/24 via FRR2 (needed for DSR return path)
 	@echo "adding return route to client-net on all nodes..."
 	-for node in $$(docker ps --filter "name=overlay-l3-bgp" --format '{{.Names}}' 2>/dev/null); do \
 	  docker exec $$node ip route replace 172.21.0.0/24 via 172.19.0.10 dev eth1; \
@@ -146,13 +181,25 @@ bgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
 lb-pool-apply: ## Apply CiliumLoadBalancerIPPool for LB IPAM
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-lb-pool.yaml
 
-frr-status: ## Show FRR BGP neighbor state
-	@docker exec frr-speaker vtysh -c "show bgp summary" 2>/dev/null || \
-	  echo "FRR container not running — try 'make frr-up' first"
+frr-status: frr2-status ## Show FRR border BGP neighbor state (alias for frr2-status)
 
-frr-routes: ## Show routes learned by FRR from Cilium peers
-	@docker exec frr-speaker vtysh -c "show bgp ipv4 unicast" 2>/dev/null || \
-	  echo "FRR container not running — try 'make frr-up' first"
+frr-routes: frr2-routes ## Show routes learned by FRR border (alias for frr2-routes)
+
+frr2-status: ## Show FRR border BGP neighbor state
+	@docker exec $(FRR2_CONTAINER) vtysh -c "show bgp summary" 2>/dev/null || \
+	  echo "FRR border not running — try 'make frr2-up' first"
+
+frr2-routes: ## Show routes in FRR border RIB
+	@docker exec $(FRR2_CONTAINER) vtysh -c "show bgp ipv4 unicast" 2>/dev/null || \
+	  echo "FRR border not running — try 'make frr2-up' first"
+
+frr1-status: ## Show FRR TOR BGP neighbor state
+	@docker exec $(FRR1_CONTAINER) vtysh -c "show bgp summary" 2>/dev/null || \
+	  echo "FRR TOR not running — try 'make frr1-up' first"
+
+frr1-routes: ## Show routes in FRR TOR RIB (should see LB VIP via FRR2)
+	@docker exec $(FRR1_CONTAINER) vtysh -c "show bgp ipv4 unicast" 2>/dev/null || \
+	  echo "FRR TOR not running — try 'make frr1-up' first"
 
 ## ---- debug ----------------------------------------------------------
 

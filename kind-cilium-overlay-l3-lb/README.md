@@ -21,8 +21,8 @@ Traffic flow:
 - Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
   allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
   automatically produces a route in FRR's RIB
-- Runs two FRR instances: **FRR2 (border, AS 65000)** peers with Cilium on
-  every node, while **FRR1 (TOR, AS 65100)** acts as the test client's default
+- Runs two FRR instances: **FRR2 (TOR-Cluster, AS 65000)** peers with Cilium on
+  every node, while **FRR1 (TOR-Client, AS 65100)** acts as the test client's default
   gateway. FRR ships bgpd+zebra together, so routes are installed into the
   kernel FIB for local reachability.
 - Ships with Hubble for observability (UI, relay, agent)
@@ -48,9 +48,9 @@ make up
 # Check it's all healthy
 make status
 make cilium-status
-make frr-status    # FRR2 border BGP summary
-make frr-routes    # FRR2 border RIB
-make frr1-routes   # FRR1 TOR RIB (LB VIP should appear here too)
+make frr-status    # FRR2 TOR-Cluster BGP summary
+make frr-routes    # FRR2 TOR-Cluster RIB
+make frr1-routes   # FRR1 TOR-Client-Client RIB (LB VIP should appear here too)
 
 # Open Hubble UI
 make hubble-ui
@@ -71,19 +71,19 @@ make hubble-ui
   make cilium-status   Run `cilium status --brief`
   make hubble-ui       Port-forward Hubble UI to :12000
 
-  make frr-up          Start both FRR speakers (TOR + border)
-  make frr1-up         Start FRR TOR only
-  make frr2-up         Start FRR border only
+  make frr-up          Start both FRR speakers (TOR-Client + TOR-Cluster)
+  make frr1-up         Start FRR TOR-Client only
+  make frr2-up         Start FRR TOR-Cluster only
   make frr-down        Stop both FRR speakers
   make bgp-apply     Apply Cilium BGP CRDs to the cluster
   make bgp-auth-secret  Create/update the k8s TCP MD5 secret
   make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
-  make frr-status      Show FRR border BGP summary (alias for frr2-status)
-  make frr-routes      Show FRR border RIB (alias for frr2-routes)
-  make frr1-status     Show FRR TOR BGP summary
-  make frr1-routes     Show FRR TOR RIB
-  make frr2-status     Show FRR border BGP summary
-  make frr2-routes     Show FRR border RIB
+  make frr-status      Show FRR TOR-Cluster BGP summary (alias for frr2-status)
+  make frr-routes      Show FRR TOR-Cluster RIB (alias for frr2-routes)
+  make frr1-status     Show FRR TOR-Client BGP summary
+  make frr1-routes     Show FRR TOR-Client RIB
+  make frr2-status     Show FRR TOR-Cluster BGP summary
+  make frr2-routes     Show FRR TOR-Cluster RIB
 
   make client-up       Start the test client (adds static routes on kind nodes)
   make client-down     Stop the test client
@@ -106,9 +106,9 @@ make hubble-ui
 
   Docker networks:
     bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management (isolated)
-    bgp-net      172.19.0.0/16  Server L2: Cilium nodes + FRR2 border
-    transit-net  172.23.0.0/24  Transit L2: FRR2 border ↔ FRR1 TOR (isolated)
-    client-net   172.21.0.0/24  Client L2: FRR1 TOR + test client (isolated)
+    bgp-net      172.19.0.0/16  Server L2: Cilium nodes + FRR2 TOR-Cluster
+    transit-net  172.23.0.0/24  Transit L2: FRR2 TOR-Cluster ↔ FRR1 TOR-Client-Client (isolated)
+    client-net   172.21.0.0/24  Client L2: FRR1 TOR-Client-Client + test client (isolated)
 
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
@@ -118,14 +118,14 @@ make hubble-ui
     bgp-net (172.19.0.0/16):
       overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  Cilium BGP CP
       overlay-l3-bgp-worker         172.19.0.4  AS 65001  Cilium BGP CP
-      frr2 border (frr-speaker)     172.19.0.10 AS 65000  bgpd+zebra
+      frr2 TOR-Cluster (frr-speaker)     172.19.0.10 AS 65000  bgpd+zebra
 
     transit-net (172.23.0.0/24):
-      frr2 border (frr-speaker)     172.23.0.2  AS 65000
-      frr1 TOR (frr-speaker-tor)    172.23.0.1  AS 65100
+      frr2 TOR-Cluster (frr-speaker)     172.23.0.2  AS 65000
+      frr1 TOR-Client (frr-speaker-tor)    172.23.0.1  AS 65100
 
     client-net (172.21.0.0/24):
-      frr1 TOR (frr-speaker-tor)    172.21.0.10 AS 65100  client gateway
+      frr1 TOR-Client (frr-speaker-tor)    172.21.0.10 AS 65100  client gateway
       test-client                   172.21.0.100          curl LB VIP
 ```
 
@@ -134,16 +134,16 @@ make hubble-ui
 Two FRR instances form a two-hop BGP path from the client to the K8s
 cluster:
 
-- **FRR2 (border, AS 65000)**: peers with Cilium's BGP Control Plane on
+- **FRR2 (TOR-Cluster, AS 65000)**: peers with Cilium's BGP Control Plane on
   each kind node over `bgp-net`. Learns LB VIP routes and installs them
   into the kernel FIB via zebra.
-- **FRR1 (TOR, AS 65100)**: peers with FRR2 only. Advertises `client-net`
+- **FRR1 (TOR-Client, AS 65100)**: peers with FRR2 only. Advertises `client-net`
   (172.21.0.0/24) to FRR2 for the DSR return path and learns the LB VIP
   from FRR2.
 
 LB VIP propagation:
 ```
-Cilium (AS 65001) ──→ FRR2 border (AS 65000) ──→ FRR1 TOR (AS 65100) ──→ FIB
+Cilium (AS 65001) ──→ FRR2 TOR-Cluster (AS 65000) ──→ FRR1 TOR-Client-Client (AS 65100) ──→ FIB
 ```
 
 ### Manifests (`manifests/cilium-bgp.yaml`)
@@ -158,18 +158,18 @@ Cilium (AS 65001) ──→ FRR2 border (AS 65000) ──→ FRR1 TOR (AS 65100)
 
 ### FRR configs
 
-**FRR2 border** (`frr/frr.conf`): Local AS 65000, router ID 172.19.0.10.
-Two Cilium neighbors (172.19.0.4/5, AS 65001, TCP MD5 auth) and one TOR
+**FRR2 TOR-Cluster** (`frr/frr.conf`): Local AS 65000, router ID 172.19.0.10.
+Two Cilium neighbors (172.19.0.4/5, AS 65001, TCP MD5 auth) and one TOR-Client
 neighbor (172.23.0.1, AS 65100). Uses `neighbor 172.23.0.1 next-hop-self`
 so FRR1 sees the LB VIP's next-hop as FRR2's transit-net IP (172.23.0.2),
-forcing all traffic through the border router. Without this, FRR1 would
+forcing all traffic through the TOR-Cluster router. Without this, FRR1 would
 learn the Cilium worker IP (172.19.0.x, on a separate L2!) as the next-hop
 and attempt to forward traffic directly over transit-net, which doesn't
 have those routes — the packet would be dropped. Includes `no bgp
 ebgp-requires-policy` to accept routes without explicit policy. Zebra
 installs routes into the kernel FIB.
 
-**FRR1 TOR** (`frr/frr1.conf`): Local AS 65100, router ID 172.23.0.1.
+**FRR1 TOR-Client** (`frr/frr1.conf`): Local AS 65100, router ID 172.23.0.1.
 Single eBGP peer (172.23.0.2, AS 65000) over transit-net. Advertises
 `network 172.21.0.0/24` to FRR2 for the DSR return path.
 
@@ -185,19 +185,19 @@ kubectl apply -f manifests/svc-lb.yaml
 kubectl get svc test-lb
 # EXTERNAL-IP column should be 172.19.0.200 (not <pending>)
 
-# 3. Check FRR2 (border) learned the route from Cilium
+# 3. Check FRR2 (TOR-Cluster) learned the route from Cilium
 make frr-routes         # alias for make frr2-routes
 # → 172.19.0.200/32 via 172.19.0.3 and 172.19.0.4 (ECMP next-hops)
 
-# 4. Check FRR1 (TOR) learned the route from FRR2
+# 4. Check FRR1 (TOR-Client) learned the route from FRR2
 make frr1-routes
-# → 172.19.0.200/32 via 172.23.0.2 (next-hop = FRR2 border on transit-net)
+# → 172.19.0.200/32 via 172.23.0.2 (next-hop = FRR2 TOR-Cluster on transit-net)
 
 # 5. Verify kernel routes on both FRRs
 docker exec frr-speaker ip route show proto bgp
 docker exec frr-speaker-tor ip route show proto bgp
 
-# 6. Test HTTP reachability from FRR2 (border) — direct bgp-net access
+# 6. Test HTTP reachability from FRR2 (TOR-Cluster) — direct bgp-net access
 docker exec frr-speaker wget -q -O- http://172.19.0.200 | head -5
 ```
 
@@ -547,7 +547,7 @@ cluster; fine for a lab.
 ## Test client
 
 A permanent Alpine-based test client (`test-client`) lives on a separate
-subnet (`client-net`, 172.21.0.0/24) with FRR1 (TOR) as its default
+subnet (`client-net`, 172.21.0.0/24) with FRR1 (TOR-Client) as its default
 gateway. This provides an isolated client outside `bgp-net` for realistic
 end-to-end testing across a two-hop BGP path.
 
@@ -557,8 +557,8 @@ end-to-end testing across a two-hop BGP path.
 
 Traffic flow:
 
-1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR1 TOR)
-2. FRR1 forwards via eBGP-learned route → FRR2 border
+1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR1 TOR-Client)
+2. FRR1 forwards via eBGP-learned route → FRR2 TOR-Cluster
 3. FRR2 forwards via eBGP-learned route → Cilium node (ECMP)
 4. Cilium's DSR+Geneve delivers to the backend pod
 5. Pod responds with the real client IP (DSR preserves it)
@@ -576,7 +576,7 @@ docker exec -it test-client sh  # Interactive shell
 ### Requirements
 
 For DSR return traffic, the kind nodes need a route to `client-net` via
-FRR2 (border), which then forwards to FRR1 (TOR):
+FRR2 (TOR-Cluster), which then forwards to FRR1 (TOR-Client):
 
 ```sh
 docker exec overlay-l3-bgp-worker ip route add 172.21.0.0/24 via 172.19.0.10 dev eth1
