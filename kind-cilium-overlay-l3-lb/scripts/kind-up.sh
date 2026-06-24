@@ -77,7 +77,7 @@ done
 
 # Add static route on every node for the client-net (DSR return path).
 # Without this, response packets from backend pods (sourced from real client
-# IP 172.21.0.0/24) would go out the default gateway instead of via FRR.
+# IP 172.21.0.0/24) would go out the default gateway instead of via FRR2.
 CLIENT_NET_SUBNET="${CLIENT_NET_SUBNET:-172.21.0.0/24}"
 FRR_IP="${FRR_IP:-172.19.0.10}"
 for node in $(kind get nodes --name "$CLUSTER_NAME"); do

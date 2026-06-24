@@ -4,18 +4,70 @@ Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
 
 ```
-                     bgp-net (Docker bridge, L2, 172.19.0.0/16)
-             ┌──────────────────────────────────────────────────────┐
-             │                                                      │
-    overlay-l3-bgp-control-plane     overlay-l3-bgp-worker          frr-speaker
-    (kind node, K8s CP)    (kind node, worker)   (FRR bgpd+zebra)
-    172.19.0.3              172.19.0.4           172.19.0.10
-    AS 65001                AS 65001             AS 65000
-    Cilium BGP CP          Cilium BGP CP
-        │                       │                    │
-        └─────── BGP peer ──────┼────────────────────┘
-                                │
-                    (advertises LB Service IPs)
+                                 ┌──── K8s cluster ─────────────────┐
+                                 │                                   │
+                                 │  overlay-l3-bgp-control-plane    │
+                                 │  (172.19.0.3, AS 65001)          │
+                                 │  ┌──────────────┐  ┌───────────┐ │
+                                 │  │ cilium-agent │  │  backend  │ │
+                                 │  │ (BGP CP)     │  │  pod      │ │
+                                 │  └──────────────┘  │10.244.1.5│ │
+                                 │                    └───────────┘ │
+                                 │  overlay-l3-bgp-worker           │
+                                 │  (172.19.0.4, AS 65001)          │
+                                 │  ┌──────────────┐  ┌───────────┐ │
+                                 │  │ cilium-agent │  │  backend  │ │
+                                 │  │ (BGP CP)     │  │  pod      │ │
+                                 │  └──────────────┘  │10.244.2.7│ │
+                                 │                    └───────────┘ │
+                                 └─────────┬─────────────────────────┘
+                                           │ eBGP AS 65001 → AS 65000
+                                           │ advertise LB VIP 172.19.0.200/32
+ ──────────────────────────────────────────┼────────────────────────────────
+               bgp-net (172.19.0.0/16)     │
+ ──────────────────────────────────────────┼────────────────────────────────
+                                           │
+                                     ┌─────┴──────┐
+                                     │  FRR2 border│
+                                     │  AS 65000   │
+                                     │  bgpd+zebra │
+                                     │  172.19.0.10│ bgp-net
+                                     │  ip_forward │
+                                     │  172.23.0.2 │ transit-net
+                                     └──────┬──────┘
+                                            │ eBGP AS 65000 ↔ AS 65100
+                                            │ next-hop-self (LB VIP via FRR2)
+ ──────────────────────────────────────────┼────────────────────────────────
+              transit-net (172.23.0.0/24)  │
+ ──────────────────────────────────────────┼────────────────────────────────
+                                            │
+                                     ┌──────┴──────┐
+                                     │  FRR1 TOR   │
+                                     │  AS 65100   │
+                                     │  bgpd+zebra │
+                                     │  172.23.0.1 │ transit-net
+                                     │  ip_forward │
+                                     │  172.21.0.10│ client-net
+                                     └──────┬──────┘
+                                            │
+ ──────────────────────────────────────────┼────────────────────────────────
+              client-net (172.21.0.0/24)   │
+ ──────────────────────────────────────────┼────────────────────────────────
+                                            │
+                                     ┌──────┴──────┐
+                                     │  test-client │
+                                     │  Alpine      │
+                                     │  172.21.0.100│
+                                     │  gw -> FRR1  │
+                                     │  curl LB VIP │
+                                     └─────────────┘
+
+                       Traffic flow:
+                       ① curl 172.19.0.200 ──→ FRR1 TOR (default gateway)
+                       ② FRR1 ──→ eBGP (transit-net) ──→ FRR2 border
+                       ③ FRR2 ──→ eBGP ECMP (bgp-net) ──→ kind node
+                       ④ kind node ──→ DSR+Geneve ──→ backend pod
+                       ⑤ response ──→ real client IP ──→ via FRR2 ──→ FRR1 ──→ client
 ```
 
 ## What this does
@@ -27,9 +79,10 @@ Plane, peered with an external BGP speaker over a shared Docker network.
 - Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
   allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
   automatically produces a route in FRR's RIB
-- Runs an FRR speaker (AS 65000) on a shared Docker L2 bridge, peering with
-  Cilium on every node. FRR ships bgpd+zebra together, so routes are
-  installed into the kernel FIB for local reachability.
+- Runs two FRR instances: **FRR2 (border, AS 65000)** peers with Cilium on
+  every node, while **FRR1 (TOR, AS 65100)** acts as the test client's default
+  gateway. FRR ships bgpd+zebra together, so routes are installed into the
+  kernel FIB for local reachability.
 - Ships with Hubble for observability (UI, relay, agent)
 
 ## Prerequisites
@@ -47,14 +100,15 @@ Install kind: https://kind.sigs.k8s.io/docs/user/quick-start/#installation
 ## Quick start
 
 ```sh
-# Bring up the full lab (cluster + Cilium + BGP auth secret + CRDs + FRR speaker)
+# Bring up the full lab (cluster + Cilium + BGP auth secret + CRDs + both FRR speakers)
 make up
 
 # Check it's all healthy
 make status
 make cilium-status
-make frr-status
-make frr-routes
+make frr-status    # FRR2 border BGP summary
+make frr-routes    # FRR2 border RIB
+make frr1-routes   # FRR1 TOR RIB (LB VIP should appear here too)
 
 # Open Hubble UI
 make hubble-ui
@@ -64,7 +118,7 @@ make hubble-ui
 ## Make targets
 
 ```
-  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + speaker + test client
+  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + both FRR speakers + test client
   make cluster-up      Bring up just the kind cluster (no cilium/frr)
   make down            Tear down the kind cluster (also stops frr speaker and test client)
   make status          Show cluster nodes, containers, networks
@@ -75,13 +129,19 @@ make hubble-ui
   make cilium-status   Run `cilium status --brief`
   make hubble-ui       Port-forward Hubble UI to :12000
 
-  make frr-up          Start the FRR speaker (background)
-  make frr-down        Stop and remove the FRR speaker
+  make frr-up          Start both FRR speakers (TOR + border)
+  make frr1-up         Start FRR TOR only
+  make frr2-up         Start FRR border only
+  make frr-down        Stop both FRR speakers
   make bgp-apply     Apply Cilium BGP CRDs to the cluster
   make bgp-auth-secret  Create/update the k8s TCP MD5 secret
   make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
-  make frr-status      Show FRR BGP neighbor state (vtysh)
-  make frr-routes      Show routes learned by FRR (RIB)
+  make frr-status      Show FRR border BGP summary (alias for frr2-status)
+  make frr-routes      Show FRR border RIB (alias for frr2-routes)
+  make frr1-status     Show FRR TOR BGP summary
+  make frr1-routes     Show FRR TOR RIB
+  make frr2-status     Show FRR border BGP summary
+  make frr2-routes     Show FRR border RIB
 
   make client-up       Start the test client (adds static routes on kind nodes)
   make client-down     Stop the test client
@@ -103,32 +163,45 @@ make hubble-ui
     localhost:12000 →  Hubble UI
 
   Docker networks:
-    bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management
-                                  (isolated from other kind clusters)
-    bgp-net      172.19.0.0/16  Shared bridge for BGP peering
+    bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management (isolated)
+    bgp-net      172.19.0.0/16  Server L2: Cilium nodes + FRR2 border
+    transit-net  172.23.0.0/24  Transit L2: FRR2 border ↔ FRR1 TOR (isolated)
+    client-net   172.21.0.0/24  Client L2: FRR1 TOR + test client (isolated)
 
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
 
-  BGP participants (all on bgp-net):
-    overlay-l3-bgp-control-plane  172.19.0.3  AS 65001
-    overlay-l3-bgp-worker         172.19.0.4  AS 65001
-    frr-speaker          172.19.0.10 AS 65000
+  L2 segments and participants:
+
+    bgp-net (172.19.0.0/16):
+      overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  Cilium BGP CP
+      overlay-l3-bgp-worker         172.19.0.4  AS 65001  Cilium BGP CP
+      frr2 border (frr-speaker)     172.19.0.10 AS 65000  bgpd+zebra
+
+    transit-net (172.23.0.0/24):
+      frr2 border (frr-speaker)     172.23.0.2  AS 65000
+      frr1 TOR (frr-speaker-tor)    172.23.0.1  AS 65100
+
+    client-net (172.21.0.0/24):
+      frr1 TOR (frr-speaker-tor)    172.21.0.10 AS 65100  client gateway
+      test-client                   172.21.0.100          curl LB VIP
 ```
 
 ## BGP peering
 
-Cilium's BGP Control Plane on each node peers with the FRR speaker over
-the shared `bgp-net` L2 bridge. Only LoadBalancer Service IPs are
-advertised — PodCIDR routes are intentionally excluded because Cilium's
-VXLAN overlay handles pod-to-pod traffic internally. External traffic
-reaches pods exclusively through LoadBalancer Services.
+Two FRR instances form a two-hop BGP path from the client to the K8s
+cluster:
 
-FRR learns the LB VIP and installs it into the kernel FIB via zebra:
+- **FRR2 (border, AS 65000)**: peers with Cilium's BGP Control Plane on
+  each kind node over `bgp-net`. Learns LB VIP routes and installs them
+  into the kernel FIB via zebra.
+- **FRR1 (TOR, AS 65100)**: peers with FRR2 only. Advertises `client-net`
+  (172.21.0.0/24) to FRR2 for the DSR return path and learns the LB VIP
+  from FRR2.
 
+LB VIP propagation:
 ```
-FRR RIB / kernel FIB:
-  172.19.0.200/32 → 172.19.0.3 + 172.19.0.4  (ECMP, LoadBalancer IP)
+Cilium (AS 65001) ──→ FRR2 border (AS 65000) ──→ FRR1 TOR (AS 65100) ──→ FIB
 ```
 
 ### Manifests (`manifests/cilium-bgp.yaml`)
@@ -141,13 +214,22 @@ FRR RIB / kernel FIB:
 | `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
 
 
-### FRR config (`frr/frr.conf`)
+### FRR configs
 
-Local AS 65000, router ID 172.19.0.10. Two neighbors: 172.19.0.3
-(overlay-l3-bgp-control-plane) and 172.19.0.4 (overlay-l3-bgp-worker), both AS 65001, TCP MD5
-auth enabled. Includes `no bgp ebgp-requires-policy` to accept routes
-without explicit policy. Zebra is enabled (`frr/daemons`) to install routes
-into the kernel FIB.
+**FRR2 border** (`frr/frr.conf`): Local AS 65000, router ID 172.19.0.10.
+Two Cilium neighbors (172.19.0.4/5, AS 65001, TCP MD5 auth) and one TOR
+neighbor (172.23.0.1, AS 65100). Uses `neighbor 172.23.0.1 next-hop-self`
+so FRR1 sees the LB VIP's next-hop as FRR2's transit-net IP (172.23.0.2),
+forcing all traffic through the border router. Without this, FRR1 would
+learn the Cilium worker IP (172.19.0.x, on a separate L2!) as the next-hop
+and attempt to forward traffic directly over transit-net, which doesn't
+have those routes — the packet would be dropped. Includes `no bgp
+ebgp-requires-policy` to accept routes without explicit policy. Zebra
+installs routes into the kernel FIB.
+
+**FRR1 TOR** (`frr/frr1.conf`): Local AS 65100, router ID 172.23.0.1.
+Single eBGP peer (172.23.0.2, AS 65000) over transit-net. Advertises
+`network 172.21.0.0/24` to FRR2 for the DSR return path.
 
 ### Verifying LB route advertisement
 
@@ -161,16 +243,20 @@ kubectl apply -f manifests/svc-lb.yaml
 kubectl get svc test-lb
 # EXTERNAL-IP column should be 172.19.0.200 (not <pending>)
 
-# 3. Check FRR learned the route
-make frr-routes
+# 3. Check FRR2 (border) learned the route from Cilium
+make frr-routes         # alias for make frr2-routes
 # → 172.19.0.200/32 via 172.19.0.3 and 172.19.0.4 (ECMP next-hops)
 
-# 4. Verify kernel routes were installed by zebra
-docker exec frr-speaker ip route show proto bgp
+# 4. Check FRR1 (TOR) learned the route from FRR2
+make frr1-routes
+# → 172.19.0.200/32 via 172.23.0.2 (next-hop = FRR2 border on transit-net)
 
-# 5. Test HTTP reachability from the FRR container
+# 5. Verify kernel routes on both FRRs
+docker exec frr-speaker ip route show proto bgp
+docker exec frr-speaker-tor ip route show proto bgp
+
+# 6. Test HTTP reachability from FRR2 (border) — direct bgp-net access
 docker exec frr-speaker wget -q -O- http://172.19.0.200 | head -5
-# → Welcome to nginx!
 ```
 
 The route is advertised even without matching pods — BGP is "up" but traffic
@@ -519,31 +605,37 @@ cluster; fine for a lab.
 ## Test client
 
 A permanent Alpine-based test client (`test-client`) lives on a separate
-subnet (`client-net`, 172.21.0.0/24) with FRR as its default gateway.
-This provides an isolated client outside `bgp-net` for realistic end-to-end
-testing.
+subnet (`client-net`, 172.21.0.0/24) with FRR1 (TOR) as its default
+gateway. This provides an isolated client outside `bgp-net` for realistic
+end-to-end testing across a two-hop BGP path.
 
 ### Topology
 
 ```
 client-net (172.21.0.0/24, Docker bridge)
 
-test-client (172.21.0.100/24, gw 172.21.0.10)
+test-client (172.21.0.100/24, gw 172.21.0.10 = FRR1)
        │
-       └── FRR speaker (172.21.0.10 eth1 + 172.19.0.10 eth0)
-                │ ip_forward=1
+       └── FRR1 TOR (172.21.0.10 + 172.23.0.1) AS 65100
+                │ eBGP
                 │
-                ├── Cilium node worker (172.19.0.4) AS 65001
-                └── Cilium node worker2 (172.19.0.5) AS 65001
+                └── transit-net (172.23.0.0/24)
+                        │
+                        └── FRR2 border (172.23.0.2 + 172.19.0.10) AS 65000
+                                │ eBGP ECMP
+                                │
+                                ├── Cilium worker (172.19.0.4) AS 65001
+                                └── Cilium worker (172.19.0.5) AS 65001
 ```
 
 Traffic flow:
 
-1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR)
-2. FRR forwards via BGP-learned route to one of the Cilium nodes
-3. Cilium's DSR+Geneve delivers to the backend pod
-4. Pod responds with the real client IP (DSR preserves it)
-5. Return path: pod → Cilium node → FRR (via static route) → client
+1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR1 TOR)
+2. FRR1 forwards via eBGP-learned route → FRR2 border
+3. FRR2 forwards via eBGP-learned route → Cilium node (ECMP)
+4. Cilium's DSR+Geneve delivers to the backend pod
+5. Pod responds with the real client IP (DSR preserves it)
+6. Return path: pod → Cilium node → FRR2 (via static route) → FRR1 → client
 
 ### Usage
 
@@ -556,7 +648,8 @@ docker exec -it test-client sh  # Interactive shell
 
 ### Requirements
 
-For DSR return traffic, the kind nodes need a route to `client-net`:
+For DSR return traffic, the kind nodes need a route to `client-net` via
+FRR2 (border), which then forwards to FRR1 (TOR):
 
 ```sh
 docker exec overlay-l3-bgp-worker ip route add 172.21.0.0/24 via 172.19.0.10 dev eth1
