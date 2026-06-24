@@ -4,7 +4,7 @@ graph LR
             CL["test-client
                 Alpine
                 172.21.0.100
-                curl LB VIP"]
+                curl 172.19.0.200"]
             F1["FRR1 TOR
                 bgpd+zebra ip_forward
                 AS 65100
@@ -23,21 +23,24 @@ graph LR
                 next-hop-self"]
             CP["K8s Control Plane
                 172.19.0.3
-                Cilium BGP CP
-                AS 65001"]
+                no BGP"]
             WK["K8s Worker 1
                 172.19.0.4
-                Cilium BGP CP
-                AS 65001"]
+                Cilium BGP CP AS 65001
+                pod: 10.244.1.5"]
             WK2["K8s Worker 2
                 172.19.0.5
-                Cilium BGP CP
-                AS 65001"]
+                Cilium BGP CP AS 65001
+                pod: 10.244.2.7"]
+            LB["LB VIP
+                172.19.0.200/32"]
         end
     end
 
-    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| CP
-    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK
-    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK2
+    F2 ==>|eBGP ECMP| WK
+    F2 ==>|eBGP ECMP| WK2
+
+    WK -.->|advertise| LB
+    WK2 -.->|advertise| LB
 
     CL -.->|default gateway| F1
