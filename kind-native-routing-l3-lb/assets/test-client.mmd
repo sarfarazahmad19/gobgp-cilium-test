@@ -10,13 +10,13 @@ graph LR
     subgraph BN["bgp-net 172.19.0.0/16"]
         F2
         CP[K8s CP<br/>172.19.0.3<br/>no BGP]
-        WK[K8s Worker 1<br/>172.19.0.4<br/>AS 65001<br/>pod 10.244.1.5]
-        WK2[K8s Worker 2<br/>172.19.0.5<br/>AS 65001<br/>pod 10.244.2.7]
+        WK[K8s Worker 1<br/>172.19.0.4<br/>AS 65001<br/>podCIDR 10.244.1.0/24]
+        WK2[K8s Worker 2<br/>172.19.0.5<br/>AS 65001<br/>podCIDR 10.244.2.0/24]
         LB[LB VIP 172.19.0.200/32]
     end
     F2 -->|eBGP ECMP| WK
     F2 -->|eBGP ECMP| WK2
-    WK -.->|advertise 172.19.0.200/32| F2
-    WK2 -.->|advertise 172.19.0.200/32| F2
+    WK -.->|advertise 10.244.1.0/24 + 172.19.0.200/32| F2
+    WK2 -.->|advertise 10.244.2.0/24 + 172.19.0.200/32| F2
     WK -->|default gateway| F2
     WK2 -->|default gateway| F2

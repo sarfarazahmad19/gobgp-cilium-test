@@ -25,11 +25,11 @@ graph LR
         WK["K8s Worker 1
             172.19.0.4
             Cilium BGP CP AS 65001
-            pod: 10.244.1.5"]
+            podCIDR: 10.244.1.0/24"]
         WK2["K8s Worker 2
             172.19.0.5
             Cilium BGP CP AS 65001
-            pod: 10.244.2.7"]
+            podCIDR: 10.244.2.0/24"]
         LB["LB VIP
             172.19.0.200/32"]
     end
@@ -37,8 +37,8 @@ graph LR
     F2 ==>|eBGP ECMP| WK
     F2 ==>|eBGP ECMP| WK2
 
-    WK -.->|advertise 172.19.0.200/32| F2
-    WK2 -.->|advertise 172.19.0.200/32| F2
+    WK -.->|advertise 10.244.1.0/24 + 172.19.0.200/32| F2
+    WK2 -.->|advertise 10.244.2.0/24 + 172.19.0.200/32| F2
 
     CL -.->|default gateway| F1
 
