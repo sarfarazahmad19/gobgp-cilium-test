@@ -50,7 +50,7 @@ make status
 make cilium-status
 make frr-status    # FRR2 TOR-Cluster BGP summary
 make frr-routes    # FRR2 TOR-Cluster RIB
-make frr1-routes   # FRR1 TOR-Client-Client RIB (LB VIP should appear here too)
+make frr1-routes   # FRR1 TOR-Client RIB (LB VIP should appear here too)
 
 # Open Hubble UI
 make hubble-ui
@@ -78,6 +78,7 @@ make hubble-ui
   make bgp-apply     Apply Cilium BGP CRDs to the cluster
   make bgp-auth-secret  Create/update the k8s TCP MD5 secret
   make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
+  make svc-apply       Apply the sample LoadBalancer Service + Deployment
   make frr-status      Show FRR TOR-Cluster BGP summary (alias for frr2-status)
   make frr-routes      Show FRR TOR-Cluster RIB (alias for frr2-routes)
   make frr1-status     Show FRR TOR-Client BGP summary
@@ -107,8 +108,8 @@ make hubble-ui
   Docker networks:
     bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management (isolated)
     bgp-net      172.19.0.0/16  Server L2: Cilium nodes + FRR2 TOR-Cluster
-    transit-net  172.23.0.0/24  Transit L2: FRR2 TOR-Cluster ↔ FRR1 TOR-Client-Client (isolated)
-    client-net   172.21.0.0/24  Client L2: FRR1 TOR-Client-Client + test client (isolated)
+    transit-net  172.23.0.0/24  Transit L2: FRR2 TOR-Cluster ↔ FRR1 TOR-Client (isolated)
+    client-net   172.21.0.0/24  Client L2: FRR1 TOR-Client + test client (isolated)
 
   Pod CIDR:     10.244.0.0/16
   Service CIDR: 10.96.0.0/16
@@ -116,8 +117,9 @@ make hubble-ui
   L2 segments and participants:
 
     bgp-net (172.19.0.0/16):
-      overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  Cilium BGP CP
+      overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  (BGP CP excluded)
       overlay-l3-bgp-worker         172.19.0.4  AS 65001  Cilium BGP CP
+      overlay-l3-bgp-worker2        172.19.0.5  AS 65001  Cilium BGP CP
       frr2 TOR-Cluster (frr-speaker)     172.19.0.10 AS 65000  bgpd+zebra
 
     transit-net (172.23.0.0/24):
@@ -143,7 +145,7 @@ cluster:
 
 LB VIP propagation:
 ```
-Cilium (AS 65001) ──→ FRR2 TOR-Cluster (AS 65000) ──→ FRR1 TOR-Client-Client (AS 65100) ──→ FIB
+Cilium (AS 65001) ──→ FRR2 TOR-Cluster (AS 65000) ──→ FRR1 TOR-Client (AS 65100) ──→ FIB
 ```
 
 ### Manifests (`manifests/cilium-bgp.yaml`)
@@ -187,7 +189,7 @@ kubectl get svc test-lb
 
 # 3. Check FRR2 (TOR-Cluster) learned the route from Cilium
 make frr-routes         # alias for make frr2-routes
-# → 172.19.0.200/32 via 172.19.0.3 and 172.19.0.4 (ECMP next-hops)
+# → 172.19.0.200/32 via 172.19.0.4 and 172.19.0.5 (ECMP next-hops)
 
 # 4. Check FRR1 (TOR-Client) learned the route from FRR2
 make frr1-routes
@@ -234,13 +236,12 @@ hits the kube-proxy replacement (Cilium eBPF), finds no backend, and is
 dropped/refused. BGP looks "up", the service is a black hole.
 
 **What to do:**
-- Create matching pods before treating the route as functional. For the
-  sample `test-lb`:
+- Create matching pods before treating the route as functional. Apply the
+  sample manifest which already bundles a go-httpbin Deployment:
   ```sh
-  kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml run test \
-    --image=nginx --labels=app=test --port=80
+  make svc-apply   # or: kubectl apply -f manifests/svc-lb.yaml
   ```
-  Re-check `make frr-routes` and curl the VIP from `bgp-net`.
+  Re-check `make frr-routes` and curl the VIP from the test client.
 
 **How to make BGP honestly reflect endpoint health (advanced, optional):**
 - `externalTrafficPolicy: Local` on the Service: a node withdraws its route
@@ -257,7 +258,7 @@ side.
 
 **What we saw:**
 - `docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"` shows the
-  same Service prefix with two next-hops: `172.19.0.3` and `172.19.0.4`.
+  same Service prefix with two next-hops: `172.19.0.4` and `172.19.0.5`.
 
 **Why:** Every node in the cluster runs a Cilium BGP instance
 (`nodeSelector: {}` in `CiliumBGPClusterConfig/overlay-l3-bgp-bgp`), each
@@ -294,7 +295,7 @@ Three checks, in order of usefulness:
    # or: docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"
    ```
    Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
-   `bgp-net` (`172.19.0.3` / `172.19.0.4`).
+   `bgp-net` (`172.19.0.4` / `172.19.0.5`).
 
 If 1 passes but 2 fails → Cilium BGP CP can't reach the speaker; check
 `authSecretRef` secret, TCP MD5 password match, and `bgp-net` connectivity.
@@ -309,7 +310,7 @@ Add more findings as they surface.
 
 ```
   Cluster name:  overlay-l3-bgp
-  Nodes:         1 control-plane + 1 worker
+  Nodes:         1 control-plane + 2 workers
   Image:         kindest/node:v1.33.0
   CNI:           Cilium (kindnet disabled)
   kube-proxy:    disabled (eBPF replacement)
@@ -331,6 +332,9 @@ Cilium is installed with these key settings:
 | `bpf.masquerade`             | true     | eBPF-based masquerading (perf)        |
 | `devices`                    | {eth0,eth1} | BGP peering on eth1 needs BPF     |
 | `directRoutingDevice`        | eth0     | Must be explicit with multiple devices |
+| `loadBalancer.mode`          | dsr      | Direct Server Return for LB traffic     |
+| `loadBalancer.dsrDispatch`   | geneve   | Geneve encapsulation for DSR dispatch   |
+| `tunnelProtocol`             | geneve   | Geneve overlay for pod-to-pod           |
 
 ## Failover testing
 
@@ -402,72 +406,58 @@ questions for this lab, with the current answer and a "why it matters" note.*
 
 ### 1. Will this setup leak route advertisements or peer with other nodes? Do we have authentication?
 
-**Short answer: it won't leak today, but it has no auth.**
+**Short answer: it won't leak, and auth is applied.**
 
 #### Why it doesn't leak
 
-- **GoBGP is configured with two static neighbors** (`172.19.0.3`,
-  `172.19.0.4`) in `gobgp/gobgpd.toml`. It does **not** listen for incoming
-  connections (`port = 179` in the config is the *target* port it dials to,
-  not a `listen` directive) and it does **not** run any auto-discovery /
-  listen-range (e.g. no `bgp listen range` like FRR has). So it cannot
-  accidentally accept a peer from a host on the Docker bridge.
+- **FRR2 (TOR-Cluster) is configured with three static neighbors**
+  (`172.19.0.4`, `172.19.0.5`, `172.23.0.1` for FRR1) in `frr/frr.conf`. It
+  does not run `bgp listen Range` and only accepts inbound connections from
+  configured neighbors. So it cannot accidentally accept a peer from a host
+  on the Docker bridge.
 - **Cilium is configured with one static peer** (`172.19.0.10` AS 65000) in
   `manifests/cilium-bgp.yaml` (`CiliumBGPClusterConfig/overlay-l3-bgp-bgp`).
   It is also an active-mode initiator with a fixed peer address — it won't
   accept an inbound session from an unknown neighbor either.
-- The two speakers live on `bgp-net` (172.19.0.0/16), which is a dedicated
+- The speakers live on `bgp-net` (172.19.0.0/16), which is a dedicated
   bridge. To leak, a foreign container would need to be **attached to that
   exact network** (and know the static peer IPs), which is a host-local
   Docker action, not a network event.
-- Routes are not exported to any other speaker (GoBGP `default-export-policy
-  = "accept"` is scoped to the two configured neighbors, and Cilium has no
-  other peers).
+- Routes are not exported to any other speaker (FRR has no other neighbors;
+  Cilium has no other peers).
 
 #### What is NOT set up (the risk surface)
 
-- **No BGP TCP MD5 authentication.** `CiliumBGPPeerConfig/overlay-l3-bgp-default`
-  has no `authSecretRef`; `gobgpd.toml` has no `auth-password` and no
-  `[[neighbors.auth-password]]`. RFC 2385 (TCP MD5) is the standard BGP auth
-  mechanism and it's off.
-- **GoBGP `default-import-policy = "accept"`** — it will accept and install
-  any route the two peers send, even malformed ones, with no prefix-list or
-  RPKI validation.
-- **GoBGP `default-export-policy = "accept"`** — if a second speaker were
-  ever added, GoBGP would advertise its entire RIB to it.
+- FRR runs `no bgp ebgp-requires-policy`, so it accepts routes from
+  configured neighbors without explicit prefix-list or RPKI validation.
 - **No TTL / eBGP-multihop hardening beyond `ebgpMultihop: 1` on Cilium.**
-  GoBGP side has no `ebgp-multihop` set explicitly.
 - **`bgp-net` is plain bridge L2.** Anyone with access to the Docker daemon
   can `docker network connect bgp-net <any-container>` and impersonate either
   peer. On a multi-tenant host, that's a real concern.
 
 #### Why it matters
 
-A BGP speaker on a shared bridge without auth and with accept-all policies
-is fine for a single-user laptop lab (the threat model is "I mess up my own
-cluster"), but is **not safe** to run on a shared host, CI runner, or cloud
-VM where other workloads can reach the Docker socket. A noisy neighbor or a
-malicious container could:
+A BGP speaker on a shared bridge without auth is fine for a single-user
+laptop lab (the threat model is "I mess up my own cluster"), but is **not
+safe** to run on a shared host, CI runner, or cloud VM where other workloads
+can reach the Docker socket. A noisy neighbor or a malicious container could:
 
-1. Open a TCP/179 session to `172.19.0.3` or `172.19.0.4` and claim to be
-   `172.19.0.10` (no MD5 check) → inject black-hole routes into Cilium →
-   poison the cluster's egress for the prefix it advertises.
-2. Accept inbound BGP from GoBGP if `bgp-net` is ever bridged outward and
-   drain the PodCIDR routes to an external speaker.
+1. Open a TCP/179 session to a Cilium worker IP and claim to be
+   `172.19.0.10` (no MD5 check would drop it) → inject black-hole routes
+   into Cilium → poison the cluster's egress for the prefix it advertises.
+2. Accept inbound BGP if `bgp-net` is ever bridged outward and drain the
+   Service VIP routes to an external speaker.
 
 #### Mitigations (status)
 
 - ✅ **TCP MD5 auth (RFC 2385) — APPLIED.** `CiliumBGPPeerConfig/overlay-l3-bgp-default`
   references `authSecretRef: bgp-auth`, and the matching k8s Secret
   (in `kube-system`, key `password`) is created by `make bgp-auth-secret`.
-  Both `[neighbors.config]` blocks in `gobgp/gobgpd.toml` set
-  `auth-password = "..."`. The lab password is in plaintext in the toml and
-  the Makefile default — fine for a local lab, replace before committing
-  anywhere public. The default Makefile variable is `BGP_AUTH_PASSWORD`
-  (override with `make bgp-auth-secret BGP_AUTH_PASSWORD=...`).
-- 🟡 Replace `default-import-policy = "accept"` with a prefix-list that only
-  allows `10.244.0.0/16` and `10.96.0.0/16` (the cluster's CIDRs).
-- 🟡 Optionally enable RPKI validation on GoBGP.
+  Each `neighbor` block in `frr/frr.conf` sets `password bgp-md5-secret-2026`.
+  The lab password is in plaintext — fine for a local lab, replace before
+  committing anywhere public. The default Makefile variable is
+  `BGP_AUTH_PASSWORD` (override with `make bgp-auth-secret BGP_AUTH_PASSWORD=...`).
+- 🟡 Optionally enable RPKI validation on FRR.
 - 🟡 Restrict `bgp-net` membership in `docker-compose.yml` (it's already
   exclusive via `external: true`, but no MAC/IP allowlist).
 
@@ -481,42 +471,39 @@ malicious container could:
   `password`. If the Secret is missing, Cilium logs an error and the session
   proceeds with an empty password (no auth, same as today) — so the Secret
   must be created *before* the PeerConfig references it.
-- **GoBGP side:** `auth-password = "<value>"` under each `[neighbors.config]`
-  block in `gobgpd.toml`. Plain string in the file (mount the file as a
-  `docker-compose` secret or inject via env if you don't want it on disk).
+- **FRR side:** `neighbor <addr> password "<value>"` in each neighbor block
+  of `frr/frr.conf`. Plain string in the file (mount as a docker-compose
+  secret or inject via env if you don't want it on disk).
 - **No asymmetric config** — both ends must have the same password or the
   session will fail to come up; Cilium's failure mode is `dial: i/o timeout`
   (the OS-level TCP MD5 mismatch drops SYN segments silently).
 - **Caveat:** TCP MD5 signs the TCP header, so the BGP source/destination IP
-  seen by each side must match the configured peer address exactly. If you
-  ever change the source interface (`transport.sourceInterface`) or use any
-  form of address translation in front of the Cilium agent, the MD5 check
-  will fail. In this lab both sides use the `bgp-net` IP directly, so this
-  is fine.
+  seen by each side must match the configured peer address exactly. In this
+  lab both sides use the `bgp-net` IP directly, so this is fine.
 - **Stronger options (not currently supported by both ends):** TCP-AO
-  (RFC 5925) is the successor to MD5 but Cilium BGP and GoBGP only do MD5.
-  For real production, use a dedicated underlay network (no shared L2).
+  (RFC 5925) is the successor to MD5 but Cilium BGP and FRR (bgpd) only do
+  MD5. For real production, use a dedicated underlay network (no shared L2).
 
 **Status: applied.** See "Mitigations" above — `make bgp-auth-secret`
-creates the k8s Secret and `gobgpd.toml` is committed with the matching
-password. To rotate: edit the toml + `make bgp-auth-secret` with the new
-value, then `make frr-down && make frr-up` and let Cilium reconcile.
+creates the k8s Secret and `frr/frr.conf` is committed with the matching
+password on each Cilium neighbor. To rotate: edit `frr/frr.conf`, change the
+password, `make bgp-auth-secret` with the new value, then `make frr-down &&
+make frr-up` and let Cilium reconcile.
 
 ### 2. Is Cilium in overlay (tunnel) mode? (answered)
 
-**Yes, VXLAN.** `cilium status` reports `Network: Tunnel [vxlan]`.
-Pod-to-pod on the same node uses direct routing; pod-to-pod across nodes
-uses VXLAN encapsulation over the `kind` bridge. For L3 service
-reachability from an external speaker, this means return traffic still
-traverses Cilium's overlay — there is no "clean" routed path from GoBGP to
-a pod IP without also enabling native routing in Cilium.
+**Yes, Geneve.** Pod-to-pod on the same node uses direct routing; pod-to-pod
+across nodes uses Geneve encapsulation over the `bgp-kind` bridge. For L3
+service reachability from an external speaker, this means return traffic
+still traverses Cilium's overlay — there is no "clean" routed path from FRR
+to a pod IP without also enabling native routing in Cilium.
 
 ### 3. Is the setup isolated? (answered, partially)
 
 - `bgp-net` (172.19.0.0/16) is exclusive to this project.
 - The **kind Docker network is shared** with the `flux-cluster` cluster on
   the host (both end up on the same `kind` bridge with overlapping CIDRs).
-  L2 reachability exists between `gobgp-*` nodes and
+  L2 reachability exists between `overlay-l3-bgp-*` nodes and
   `flux-cluster-control-plane`. Mitigate by giving each kind cluster a
   unique `--network-name` (not currently set in `kind.yaml`).
 
@@ -529,10 +516,10 @@ ship with a LoadBalancer IPAM controller. `kubectl expose ... --type=
 LoadBalancer` will give `EXTERNAL-IP: <pending>` until you install
 LB IPAM (`CiliumLoadBalancerIPPool`) or annotate the service manually.
 
-When it does work, the route in GoBGP looks like:
+When it does work, the route in FRR2 looks like:
 
 ```
-10.96.<svc-ip>/32  next-hop 172.19.0.{3|4}  AS_PATH 65001  Origin i
+172.19.0.200/32  next-hop 172.19.0.{4|5}  AS_PATH 65001  Origin i
 ```
 
 ECMP happens when pods for the service are on both nodes, but only if

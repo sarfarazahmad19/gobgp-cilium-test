@@ -1,9 +1,9 @@
 ---
 # CiliumLoadBalancerIPPool — allocates LoadBalancer IPs from the bgp-net
-# subnet (172.19.0.0/16) so they are directly routable from the GoBGP speaker
+# subnet (172.19.0.0/16) so they are directly routable from the FRR speaker
 # (172.19.0.10) without NAT. The advertisement in cilium-bgp.yaml already
 # includes Service/LoadBalancerIP, so any IP assigned from this pool will be
-# advertised to GoBGP automatically.
+# advertised to FRR automatically.
 apiVersion: cilium.io/v2
 kind: CiliumLoadBalancerIPPool
 metadata:

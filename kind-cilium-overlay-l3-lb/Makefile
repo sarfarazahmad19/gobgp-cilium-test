@@ -5,6 +5,7 @@ CLUSTER_NAME      ?= overlay-l3-bgp
 CP_CONTAINER      ?= overlay-l3-bgp-control-plane
 NETWORK_NAME      ?= bgp-net
 CLIENT_NETWORK    ?= client-net
+CLIENT_NETWORK_SUBNET ?= 172.21.0.0/24
 TRANSIT_NETWORK   ?= transit-net
 KIND_NETWORK      ?= bgp-kind
 KUBECONFIG        ?= $(PWD)/.kubeconfig/kubeconfig.yaml
@@ -64,7 +65,7 @@ net-rm: ## Remove all docker networks (bgp-net + client-net + transit-net + kind
 
 .PHONY: up cluster-up down status ps logs cilium-uninstall
 
-up: cluster-up cilium-uninstall cilium-install bgp-auth-secret bgp-apply lb-pool-apply frr-up client-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + both FRR speakers + test client
+up: cluster-up cilium-uninstall cilium-install bgp-auth-secret bgp-apply lb-pool-apply svc-apply frr-up client-up ## Full bring-up: cluster + cilium + auth secret + BGP CRDs + LB pool + Service + both FRR speakers + test client
 	@echo
 	@echo "all up. kubeconfig: $(KUBECONFIG)"
 	@echo "export KUBECONFIG=$(KUBECONFIG)"
@@ -112,14 +113,15 @@ hubble-ui: ## Port-forward hubble UI to http://localhost:12000
 
 BGP_AUTH_PASSWORD ?= bgp-md5-secret-2026
 
-.PHONY: frr-up frr-down client-up client-down client-route-add client-test bgp-apply bgp-auth-secret lb-pool-apply
+.PHONY: frr-up frr-down client-up client-down client-route-add client-test bgp-apply bgp-auth-secret lb-pool-apply svc-apply
 
 FRR2_CONTAINER  ?= frr-speaker
 FRR1_CONTAINER  ?= frr-speaker-tor
+FRR2_IP         ?= 172.19.0.10
 
 .PHONY: frr-up frr1-up frr2-up frr-down frr1-down frr2-down
 .PHONY: client-up client-down client-test client-route-add
-.PHONY: bgp-apply bgp-auth-secret lb-pool-apply
+.PHONY: bgp-apply bgp-auth-secret lb-pool-apply svc-apply
 
 frr-up: net-create ## Start both FRR speakers (TOR + border)
 	@echo "starting FRR speakers (TOR + border)..."
@@ -157,7 +159,7 @@ client-up: net-create frr1-up client-route-add ## Start the test client (depends
 client-route-add: ## Add static routes on kind nodes for 172.21.0.0/24 via FRR2 (needed for DSR return path)
 	@echo "adding return route to client-net on all nodes..."
 	-for node in $$(docker ps --filter "name=overlay-l3-bgp" --format '{{.Names}}' 2>/dev/null); do \
-	  docker exec $$node ip route replace 172.21.0.0/24 via 172.19.0.10 dev eth1; \
+	  docker exec $$node ip route replace $(CLIENT_NETWORK_SUBNET) via $(FRR2_IP) dev eth1; \
 	done
 
 client-down: ## Stop the test client
@@ -180,6 +182,9 @@ bgp-auth-secret: ## Create/update the k8s Secret used for TCP MD5 BGP auth
 
 lb-pool-apply: ## Apply CiliumLoadBalancerIPPool for LB IPAM
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/cilium-lb-pool.yaml
+
+svc-apply: ## Apply the sample LoadBalancer Service + Deployment (go-httpbin)
+	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/svc-lb.yaml
 
 frr-status: frr2-status ## Show FRR border BGP neighbor state (alias for frr2-status)
 
