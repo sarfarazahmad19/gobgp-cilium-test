@@ -3,47 +3,7 @@
 Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
 
-```mermaid
-graph LR
-    subgraph R1["Rack 1"]
-        subgraph CN["client-net 172.21.0.0/24"]
-            CL["test-client
-                Alpine
-                172.21.0.100
-                curl LB VIP"]
-            F1["FRR1 TOR
-                bgpd+zebra ip_forward
-                AS 65100
-                172.21.0.10 / 172.23.0.1"]
-        end
-    end
-
-    F1 ==>|transit-net 172.23.0.0/24 eBGP| F2
-
-    subgraph R2["Rack 2"]
-        subgraph BN["bgp-net 172.19.0.0/16"]
-            F2["FRR2 Border
-                bgpd+zebra ip_forward
-                AS 65000
-                172.19.0.10 / 172.23.0.2
-                next-hop-self"]
-            CP["K8s Control Plane
-                172.19.0.3
-                Cilium BGP CP
-                AS 65001"]
-            WK["K8s Worker
-                172.19.0.4
-                Cilium BGP CP
-                AS 65001"]
-        end
-    end
-
-    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| CP
-    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK
-
-    CL -.->|default gateway| F1
-
-```
+![Topology diagram](assets/topology.png)
 
 Traffic flow:
 1. client → FRR1 (default gateway)
@@ -593,23 +553,7 @@ end-to-end testing across a two-hop BGP path.
 
 ### Topology
 
-```mermaid
-graph LR
-    subgraph CN["client-net 172.21.0.0/24"]
-        CL[test-client<br/>172.21.0.100] -- default gw --> F1
-        F1[FRR1 TOR<br/>AS 65100<br/>172.21.0.10]
-    end
-    F1 -->|transit-net eBGP| F2
-    subgraph TN["transit-net 172.23.0.0/24"]
-        F2[FRR2 Border<br/>AS 65000<br/>172.23.0.2]
-    end
-    F2 -->|bgp-net eBGP ECMP| CP
-    F2 -->|bgp-net eBGP ECMP| WK
-    subgraph BN["bgp-net 172.19.0.0/16"]
-        CP[K8s CP<br/>172.19.0.3<br/>AS 65001]
-        WK[K8s Worker<br/>172.19.0.4<br/>AS 65001]
-    end
-```
+![Test client topology](assets/test-client.png)
 
 Traffic flow:
 
