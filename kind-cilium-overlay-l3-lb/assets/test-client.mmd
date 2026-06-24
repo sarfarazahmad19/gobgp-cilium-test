@@ -9,7 +9,9 @@ graph LR
     end
     F2 -->|bgp-net eBGP ECMP| CP
     F2 -->|bgp-net eBGP ECMP| WK
+    F2 -->|bgp-net eBGP ECMP| WK2
     subgraph BN["bgp-net 172.19.0.0/16"]
         CP[K8s CP<br/>172.19.0.3<br/>AS 65001]
-        WK[K8s Worker<br/>172.19.0.4<br/>AS 65001]
+        WK[K8s Worker 1<br/>172.19.0.4<br/>AS 65001]
+        WK2[K8s Worker 2<br/>172.19.0.5<br/>AS 65001]
     end

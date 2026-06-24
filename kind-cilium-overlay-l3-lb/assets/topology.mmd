@@ -25,8 +25,12 @@ graph LR
                 172.19.0.3
                 Cilium BGP CP
                 AS 65001"]
-            WK["K8s Worker
+            WK["K8s Worker 1
                 172.19.0.4
+                Cilium BGP CP
+                AS 65001"]
+            WK2["K8s Worker 2
+                172.19.0.5
                 Cilium BGP CP
                 AS 65001"]
         end
@@ -34,5 +38,6 @@ graph LR
 
     F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| CP
     F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK
+    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK2
 
     CL -.->|default gateway| F1
