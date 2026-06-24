@@ -3,72 +3,54 @@
 Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
 
-```
-                                 ┌──── K8s cluster ─────────────────┐
-                                 │                                   │
-                                 │  overlay-l3-bgp-control-plane    │
-                                 │  (172.19.0.3, AS 65001)          │
-                                 │  ┌──────────────┐  ┌───────────┐ │
-                                 │  │ cilium-agent │  │  backend  │ │
-                                 │  │ (BGP CP)     │  │  pod      │ │
-                                 │  └──────────────┘  │10.244.1.5│ │
-                                 │                    └───────────┘ │
-                                 │  overlay-l3-bgp-worker           │
-                                 │  (172.19.0.4, AS 65001)          │
-                                 │  ┌──────────────┐  ┌───────────┐ │
-                                 │  │ cilium-agent │  │  backend  │ │
-                                 │  │ (BGP CP)     │  │  pod      │ │
-                                 │  └──────────────┘  │10.244.2.7│ │
-                                 │                    └───────────┘ │
-                                 └─────────┬─────────────────────────┘
-                                           │ eBGP AS 65001 → AS 65000
-                                           │ advertise LB VIP 172.19.0.200/32
- ──────────────────────────────────────────┼────────────────────────────────
-               bgp-net (172.19.0.0/16)     │
- ──────────────────────────────────────────┼────────────────────────────────
-                                           │
-                                     ┌─────┴──────┐
-                                     │  FRR2 border│
-                                     │  AS 65000   │
-                                     │  bgpd+zebra │
-                                     │  172.19.0.10│ bgp-net
-                                     │  ip_forward │
-                                     │  172.23.0.2 │ transit-net
-                                     └──────┬──────┘
-                                            │ eBGP AS 65000 ↔ AS 65100
-                                            │ next-hop-self (LB VIP via FRR2)
- ──────────────────────────────────────────┼────────────────────────────────
-              transit-net (172.23.0.0/24)  │
- ──────────────────────────────────────────┼────────────────────────────────
-                                            │
-                                     ┌──────┴──────┐
-                                     │  FRR1 TOR   │
-                                     │  AS 65100   │
-                                     │  bgpd+zebra │
-                                     │  172.23.0.1 │ transit-net
-                                     │  ip_forward │
-                                     │  172.21.0.10│ client-net
-                                     └──────┬──────┘
-                                            │
- ──────────────────────────────────────────┼────────────────────────────────
-              client-net (172.21.0.0/24)   │
- ──────────────────────────────────────────┼────────────────────────────────
-                                            │
-                                     ┌──────┴──────┐
-                                     │  test-client │
-                                     │  Alpine      │
-                                     │  172.21.0.100│
-                                     │  gw -> FRR1  │
-                                     │  curl LB VIP │
-                                     └─────────────┘
+```mermaid
+graph LR
+    subgraph R1["Rack 1"]
+        subgraph CN["client-net 172.21.0.0/24"]
+            CL["test-client
+                Alpine
+                172.21.0.100
+                curl LB VIP"]
+            F1["FRR1 TOR
+                bgpd+zebra ip_forward
+                AS 65100
+                172.21.0.10 / 172.23.0.1"]
+        end
+    end
 
-                       Traffic flow:
-                       ① curl 172.19.0.200 ──→ FRR1 TOR (default gateway)
-                       ② FRR1 ──→ eBGP (transit-net) ──→ FRR2 border
-                       ③ FRR2 ──→ eBGP ECMP (bgp-net) ──→ kind node
-                       ④ kind node ──→ DSR+Geneve ──→ backend pod
-                       ⑤ response ──→ real client IP ──→ via FRR2 ──→ FRR1 ──→ client
+    F1 ==>|transit-net 172.23.0.0/24 eBGP| F2
+
+    subgraph R2["Rack 2"]
+        subgraph BN["bgp-net 172.19.0.0/16"]
+            F2["FRR2 Border
+                bgpd+zebra ip_forward
+                AS 65000
+                172.19.0.10 / 172.23.0.2
+                next-hop-self"]
+            CP["K8s Control Plane
+                172.19.0.3
+                Cilium BGP CP
+                AS 65001"]
+            WK["K8s Worker
+                172.19.0.4
+                Cilium BGP CP
+                AS 65001"]
+        end
+    end
+
+    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| CP
+    F2 ==>|eBGP ECMP  LB VIP 172.19.0.200/32| WK
+
+    CL -.->|default gateway| F1
+
 ```
+
+Traffic flow:
+1. client → FRR1 (default gateway)
+2. FRR1 → FRR2 (transit-net eBGP)
+3. FRR2 → Cilium (bgp-net eBGP ECMP)
+4. Cilium DSR+Geneve → backend pod
+5. response via FRR2 → FRR1 → client (DSR return)
 
 ## What this does
 
@@ -611,21 +593,22 @@ end-to-end testing across a two-hop BGP path.
 
 ### Topology
 
-```
-client-net (172.21.0.0/24, Docker bridge)
-
-test-client (172.21.0.100/24, gw 172.21.0.10 = FRR1)
-       │
-       └── FRR1 TOR (172.21.0.10 + 172.23.0.1) AS 65100
-                │ eBGP
-                │
-                └── transit-net (172.23.0.0/24)
-                        │
-                        └── FRR2 border (172.23.0.2 + 172.19.0.10) AS 65000
-                                │ eBGP ECMP
-                                │
-                                ├── Cilium worker (172.19.0.4) AS 65001
-                                └── Cilium worker (172.19.0.5) AS 65001
+```mermaid
+graph LR
+    subgraph CN["client-net 172.21.0.0/24"]
+        CL[test-client<br/>172.21.0.100] -- default gw --> F1
+        F1[FRR1 TOR<br/>AS 65100<br/>172.21.0.10]
+    end
+    F1 -->|transit-net eBGP| F2
+    subgraph TN["transit-net 172.23.0.0/24"]
+        F2[FRR2 Border<br/>AS 65000<br/>172.23.0.2]
+    end
+    F2 -->|bgp-net eBGP ECMP| CP
+    F2 -->|bgp-net eBGP ECMP| WK
+    subgraph BN["bgp-net 172.19.0.0/16"]
+        CP[K8s CP<br/>172.19.0.3<br/>AS 65001]
+        WK[K8s Worker<br/>172.19.0.4<br/>AS 65001]
+    end
 ```
 
 Traffic flow:
