@@ -1,7 +1,9 @@
-# bgp-kind-cilium
+# bgp-kind-cilium (overlay)
 
 Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
 Plane, peered with an external BGP speaker over a shared Docker network.
+Uses **Geneve overlay tunnel** for pod-to-pod traffic and **DSR (Direct
+Server Return)** for LoadBalancer services.
 
 ![Topology diagram](assets/topology.png)
 
@@ -10,7 +12,7 @@ Traffic flow:
 2. FRR1 → FRR2 (transit-net eBGP)
 3. FRR2 → Cilium (bgp-net eBGP ECMP)
 4. Cilium DSR+Geneve → backend pod
-5. response via FRR2 → FRR1 → client (DSR return)
+5. response: pod → node → FRR2 (default gateway) → FRR1 → client
 
 ## What this does
 
@@ -86,10 +88,10 @@ make hubble-ui
   make frr2-status     Show FRR TOR-Cluster BGP summary
   make frr2-routes     Show FRR TOR-Cluster RIB
 
-  make client-up       Start the test client (adds static routes on kind nodes)
+  make client-up       Start the test client (sets FRR2 as default gw on nodes)
   make client-down     Stop the test client
   make client-test     Curl the LB VIP from the test client
-  make client-route-add  Add static routes for client-net return path
+  make client-route-add  Set FRR2 as default gateway on all kind nodes
 
   make net-create      Create the shared bgp-net + client-net networks
   make net-rm          Remove all networks
@@ -106,7 +108,6 @@ make hubble-ui
     localhost:12000 →  Hubble UI
 
   Docker networks:
-    bgp-kind     172.20.0.0/16  Dedicated bridge for cluster management (isolated)
     bgp-net      172.19.0.0/16  Server L2: Cilium nodes + FRR2 TOR-Cluster
     transit-net  172.23.0.0/24  Transit L2: FRR2 TOR-Cluster ↔ FRR1 TOR-Client (isolated)
     client-net   172.21.0.0/24  Client L2: FRR1 TOR-Client + test client (isolated)
@@ -140,7 +141,7 @@ cluster:
   each kind node over `bgp-net`. Learns LB VIP routes and installs them
   into the kernel FIB via zebra.
 - **FRR1 (TOR-Client, AS 65100)**: peers with FRR2 only. Advertises `client-net`
-  (172.21.0.0/24) to FRR2 for the DSR return path and learns the LB VIP
+  (172.21.0.0/24) to FRR2 for the return path and learns the LB VIP
   from FRR2.
 
 LB VIP propagation:
@@ -173,7 +174,7 @@ installs routes into the kernel FIB.
 
 **FRR1 TOR-Client** (`frr/frr1.conf`): Local AS 65100, router ID 172.23.0.1.
 Single eBGP peer (172.23.0.2, AS 65000) over transit-net. Advertises
-`network 172.21.0.0/24` to FRR2 for the DSR return path.
+`network 172.21.0.0/24` to FRR2 for the return path.
 
 ### Verifying LB route advertisement
 
@@ -493,7 +494,7 @@ make frr-up` and let Cilium reconcile.
 ### 2. Is Cilium in overlay (tunnel) mode? (answered)
 
 **Yes, Geneve.** Pod-to-pod on the same node uses direct routing; pod-to-pod
-across nodes uses Geneve encapsulation over the `bgp-kind` bridge. For L3
+across nodes uses Geneve encapsulation over the `kind` bridge. For L3
 service reachability from an external speaker, this means return traffic
 still traverses Cilium's overlay — there is no "clean" routed path from FRR
 to a pod IP without also enabling native routing in Cilium.
@@ -549,12 +550,12 @@ Traffic flow:
 3. FRR2 forwards via eBGP-learned route → Cilium node (ECMP)
 4. Cilium's DSR+Geneve delivers to the backend pod
 5. Pod responds with the real client IP (DSR preserves it)
-6. Return path: pod → Cilium node → FRR2 (via static route) → FRR1 → client
+6. Return path: pod → node → FRR2 (default gateway) → FRR1 → client
 
 ### Usage
 
 ```sh
-make client-up        # Start the client (also adds routes on kind nodes)
+make client-up        # Start the client (also sets FRR2 as default gw on nodes)
 make client-down      # Stop the client
 make client-test      # curl the LB VIP from the client
 docker exec -it test-client sh  # Interactive shell
@@ -562,15 +563,17 @@ docker exec -it test-client sh  # Interactive shell
 
 ### Requirements
 
-For DSR return traffic, the kind nodes need a route to `client-net` via
-FRR2 (TOR-Cluster), which then forwards to FRR1 (TOR-Client):
+FRR2 (TOR-Cluster) is set as the default gateway on all kind nodes. FRR2
+handles all non-local routing including the client-net return path
+(learned from FRR1 via BGP):
 
 ```sh
-docker exec overlay-l3-bgp-worker ip route add 172.21.0.0/24 via 172.19.0.10 dev eth1
+docker exec overlay-l3-bgp-worker ip route add default via 172.19.0.10
 ```
 
 This is handled automatically by `make client-up` (via the `client-route-add`
-target). The route is not persistent across node restarts.
+target) and at cluster creation time (`scripts/kind-up.sh`). The route is
+not persistent across node restarts — re-run `make client-route-add` to restore it.
 
 ## Cleanup
 

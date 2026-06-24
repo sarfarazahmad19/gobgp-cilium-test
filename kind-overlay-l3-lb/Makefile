@@ -5,9 +5,7 @@ CLUSTER_NAME      ?= overlay-l3-bgp
 CP_CONTAINER      ?= overlay-l3-bgp-control-plane
 NETWORK_NAME      ?= bgp-net
 CLIENT_NETWORK    ?= client-net
-CLIENT_NETWORK_SUBNET ?= 172.21.0.0/24
 TRANSIT_NETWORK   ?= transit-net
-KIND_NETWORK      ?= bgp-kind
 KUBECONFIG        ?= $(PWD)/.kubeconfig/kubeconfig.yaml
 KIND_IMAGE        ?= kindest/node:v1.33.0
 CILIUM_VERSION    ?= 1.19.5
@@ -19,7 +17,6 @@ export CP_CONTAINER
 export NETWORK_NAME
 export CLIENT_NETWORK
 export TRANSIT_NETWORK
-export KIND_NETWORK
 export CILIUM_VERSION
 
 .PHONY: help
@@ -36,12 +33,6 @@ net-create: ## Create docker networks (idempotent)
 	  docker network create --driver bridge --subnet 172.19.0.0/16 $(NETWORK_NAME); \
 	  echo "created network $(NETWORK_NAME)"; \
 	fi
-	@if docker network inspect $(KIND_NETWORK) >/dev/null 2>&1; then \
-	  echo "network $(KIND_NETWORK) already exists"; \
-	else \
-	  docker network create --driver bridge --subnet 172.20.0.0/16 $(KIND_NETWORK); \
-	  echo "created network $(KIND_NETWORK)"; \
-	fi
 	@if docker network inspect $(CLIENT_NETWORK) >/dev/null 2>&1; then \
 	  echo "network $(CLIENT_NETWORK) already exists"; \
 	else \
@@ -55,11 +46,10 @@ net-create: ## Create docker networks (idempotent)
 	  echo "created network $(TRANSIT_NETWORK) (172.23.0.0/24, gw 172.23.0.254)"; \
 	fi
 
-net-rm: ## Remove all docker networks (bgp-net + client-net + transit-net + kind bridge)
+net-rm: ## Remove all docker networks (bgp-net + client-net + transit-net)
 	docker network rm $(NETWORK_NAME) 2>/dev/null || true
 	docker network rm $(CLIENT_NETWORK) 2>/dev/null || true
 	docker network rm $(TRANSIT_NETWORK) 2>/dev/null || true
-	docker network rm $(KIND_NETWORK) 2>/dev/null || true
 
 ## ---- cluster lifecycle -----------------------------------------------
 
@@ -156,10 +146,10 @@ client-up: net-create frr1-up client-route-add ## Start the test client (depends
 	docker compose up -d client
 	@echo "test-client shell: docker exec -it test-client sh"
 
-client-route-add: ## Add static routes on kind nodes for 172.21.0.0/24 via FRR2 (needed for DSR return path)
-	@echo "adding return route to client-net on all nodes..."
+client-route-add: ## Set FRR2 as default gateway on all kind nodes
+	@echo "setting FRR2 (172.19.0.10) as default gateway on all kind nodes..."
 	-for node in $$(docker ps --filter "name=overlay-l3-bgp" --format '{{.Names}}' 2>/dev/null); do \
-	  docker exec $$node ip route replace $(CLIENT_NETWORK_SUBNET) via $(FRR2_IP) dev eth1; \
+	  docker exec $$node sh -c "ip route flush 0/0 2>/dev/null; ip route add default via $(FRR2_IP)"; \
 	done
 
 client-down: ## Stop the test client

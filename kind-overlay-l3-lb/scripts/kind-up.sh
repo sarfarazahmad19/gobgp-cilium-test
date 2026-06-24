@@ -6,7 +6,7 @@ set -eu
 
 CLUSTER_NAME="overlay-l3-bgp"
 NETWORK_NAME="${NETWORK_NAME:-bgp-net}"
-KIND_NETWORK="${KIND_NETWORK:-bgp-kind}"
+
 KUBECONFIG_OUT="${KUBECONFIG_OUT:-/data/kubeconfig.yaml}"
 
 log() { printf "[kind-up] %s\n" "$*"; }
@@ -28,13 +28,12 @@ if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
   docker network create --driver bridge "$NETWORK_NAME" >/dev/null
 fi
 
-# Idempotent cluster creation — use the dedicated network for isolation from
-# other kind clusters on the host (they all default to the shared `kind` bridge).
+# Idempotent cluster creation — kind creates nodes on its default Docker bridge
+# (named `kind`). We add the bgp-net secondary interface with pinned IPs below.
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   log "cluster '$CLUSTER_NAME' already exists, skipping create"
 else
   log "creating cluster '$CLUSTER_NAME'"
-  export KIND_EXPERIMENTAL_DOCKER_NETWORK="$KIND_NETWORK"
   kind create cluster --config /config/kind.yaml --retain
 fi
 
@@ -75,15 +74,17 @@ for node in $(kind get nodes --name "$CLUSTER_NAME"); do
   fi
 done
 
-# Add static route on every node for the client-net (DSR return path).
-# Without this, response packets from backend pods (sourced from real client
-# IP 172.21.0.0/24) would go out the default gateway instead of via FRR2.
-CLIENT_NET_SUBNET="${CLIENT_NET_SUBNET:-172.21.0.0/24}"
-FRR_IP="${FRR_IP:-172.19.0.10}"
+# Set FRR2 (172.19.0.10) as the default gateway on every kind node.
+# FRR2 handles all non-local routing:
+#   - Inter-node Geneve tunnel traffic (the kind bridge subnet route is preserved)
+#   - Client-net return path (learned from FRR1 via BGP)
+#   - Internet-bound traffic (forwarded to Docker bridge gateway 172.19.0.1)
+# This eliminates the need for explicit DSR client-net return routes.
+FRR_GW="${FRR_GW:-172.19.0.10}"
 for node in $(kind get nodes --name "$CLUSTER_NAME"); do
-  docker exec "$node" ip route replace "$CLIENT_NET_SUBNET" via "$FRR_IP" dev eth1 2>/dev/null || true
+  docker exec "$node" sh -c "ip route flush 0/0 2>/dev/null; ip route add default via $FRR_GW" 2>/dev/null || true
 done
-log "added static route for $CLIENT_NET_SUBNET via $FRR_IP on all nodes"
+log "set default route via FRR2 ($FRR_GW) on all nodes"
 
 # Always (re)write the kubeconfig so the host can pick it up. The
 # controller runs as root (it needs the docker socket), so we loosen

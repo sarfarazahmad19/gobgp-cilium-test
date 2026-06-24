@@ -1,23 +1,25 @@
 # bgp-kind-cilium
 
-Local BGP networking lab running Cilium as a Kubernetes CNI with BGP Control
-Plane, peered with an external BGP speaker over a shared Docker network.
+Local BGP networking lab using Cilium in **native routing mode** (no overlay
+tunnel) with BGP Control Plane, peered with an external BGP speaker over a
+shared Docker network.
 
 ![Topology diagram](assets/topology.png)
 
-Traffic flow:
+Traffic flow (native routing end-to-end, no tunnel):
 1. client → FRR1 (default gateway)
 2. FRR1 → FRR2 (transit-net eBGP)
 3. FRR2 → Cilium node (bgp-net eBGP ECMP)
-4. Cilium SNAT → backend pod (native routing)
-5. response via SNAT un-NAT → FRR2 → FRR1 → client
+4. Cilium SNAT → backend pod (direct host-network routing, no Geneve)
+5. response via SNAT un-NAT → FRR2 (default gateway) → FRR1 → client
 
 ## What this does
 
 - Spins up a 2-node Kubernetes cluster (v1.33) using [kind][kind]
-- Replaces the default CNI and kube-proxy with Cilium (eBPF)
+- Replaces the default CNI and kube-proxy with Cilium (eBPF), using
+  **native routing** — no Geneve/VXLAN tunnel, Pod IPs are directly routable
 - Enables Cilium's BGP Control Plane (AS 65001) to advertise LoadBalancer
-  Service IPs via BGP
+  Service IPs and PodCIDRs via BGP
 - Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
   allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
   automatically produces a route in FRR's RIB
@@ -334,6 +336,11 @@ Cilium is installed with these key settings:
 | `routingMode`                | native   | Native routing, no overlay            |
 | `ipv4NativeRoutingCIDR`      | 10.244.0.0/16 | PodCIDR for native routing        |
 
+Cilium runs in **native routing mode** (`routingMode=native`) — no Geneve
+encapsulation. Pod IPs are directly routable on the host network. Cilium
+advertises both PodCIDRs and LB VIPs to FRR2 via BGP, enabling the return
+path for pod-initiated connections.
+
 The `devices` option lists `eth1` only — all traffic (BGP peering, LB, pod
 inter-node, apiserver) flows through `bgp-net`. FRR2 is the default gateway,
 so kind nodes don't need a separate management bridge.
@@ -555,7 +562,7 @@ Traffic flow:
 1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR1 TOR-Client)
 2. FRR1 forwards via eBGP-learned route → FRR2 TOR-Cluster
 3. FRR2 forwards via eBGP-learned route → Cilium node (ECMP)
-4. Cilium SNATs inbound traffic to the node IP → delivers to backend pod via native routing
+4. Cilium SNATs inbound traffic to the node IP → delivers to backend pod via native routing (no tunnel, direct host-network)
 5. Pod responds, Cilium un-NATs the reply
 6. Return path: node → FRR2 (default gateway) → FRR1 → client
 
@@ -574,8 +581,8 @@ The return path works automatically because FRR2 (172.19.0.10) is the default
 gateway for all kind nodes. FRR2 routes return traffic via its eBGP-learned
 route to `client-net` (172.21.0.0/24) → FRR1 → test-client.
 
-Inter-node PodCIDR routing also flows through FRR2 by default — no manual
-static routes needed.
+Inter-node PodCIDR routing also flows through FRR2 by default (native
+routing, no encapsulation) — no manual static routes needed.
 
 ## Cleanup
 

@@ -37,7 +37,6 @@ services:
       - bgp-net
     environment:
       - NETWORK_NAME=bgp-net
-      - KIND_NETWORK=bgp-kind
       - KUBECONFIG_OUT=/data/kubeconfig.yaml
     restart: "no"
 
@@ -91,7 +90,7 @@ services:
   # bgp-net. Default route is set in the entrypoint to 172.21.0.10
   # (FRR) so it must use FRR as a router to reach the LB VIP
   # 172.19.0.200 on bgp-net.
-  # Tests: FRR as gateway/router, kernel forwarding, DSR with a real
+  # Tests: FRR as gateway/router, kernel forwarding, Geneve DSR with a real
   # client IP.
   client:
     image: docker.io/library/alpine:3.20

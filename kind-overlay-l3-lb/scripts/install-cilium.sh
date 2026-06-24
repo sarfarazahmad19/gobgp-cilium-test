@@ -6,7 +6,7 @@ set -eu
 KUBECONFIG="${KUBECONFIG:-./.kubeconfig/kubeconfig.yaml}"
 CP_CONTAINER="${CP_CONTAINER:-overlay-l3-bgp-control-plane}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.19.5}"
-KIND_NETWORK="${KIND_NETWORK:-bgp-kind}"
+KIND_NETWORK="${KIND_NETWORK:-kind}"
 
 log() { printf "[install-cilium] %s\n" "$*"; }
 
@@ -29,7 +29,7 @@ log "ensuring cilium helm repo"
 helm repo add cilium https://helm.cilium.io/ >/dev/null 2>&1 || true
 helm repo update >/dev/null
 
-log "installing cilium $CILIUM_VERSION (kubeProxyReplacement=strict, hubble enabled)"
+log "installing cilium $CILIUM_VERSION (Geneve tunnel, DSR, hubble enabled)"
 helm upgrade --install cilium cilium/cilium \
   --version "$CILIUM_VERSION" \
   --namespace kube-system \

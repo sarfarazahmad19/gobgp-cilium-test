@@ -12,15 +12,17 @@ LoadBalancer IPs.
 ## Architecture
 
 ```
-  client-net        transit-net         bgp-net              bgp-kind
-  172.21.0.0/24     172.23.0.0/24       172.19.0.0/16        172.20.0.0/16
-  ─────────         ──────────           ────────────         ────────────
-  test-client  ──►  FRR1 TOR-Client ──►  FRR2 TOR-Cluster ──► overlay-l3-bgp-CP
-  172.21.0.100      172.21.0.10          172.19.0.10          (172.19.0.3)
-                    172.23.0.1           172.23.0.2           overlay-l3-bgp-worker
-                    AS 65100             AS 65000              (172.19.0.4)
-                                                              overlay-l3-bgp-worker2
-                                                              (172.19.0.5) AS 65001
+  client-net        transit-net         bgp-net
+  172.21.0.0/24     172.23.0.0/24       172.19.0.0/16
+  ─────────         ──────────           ────────────
+  test-client  ──►  FRR1 TOR-Client ──►  FRR2 TOR-Cluster (default gateway)
+  172.21.0.100      172.21.0.10          172.19.0.10
+                    172.23.0.1           172.23.0.2
+                    AS 65100             AS 65000
+                                         │
+                                         ├── overlay-l3-bgp-CP     172.19.0.3
+                                         ├── overlay-l3-bgp-worker 172.19.0.4
+                                         └── overlay-l3-bgp-worker2 172.19.0.5  AS 65001
 ```
 
 - **Cluster name:** `overlay-l3-bgp`
@@ -31,9 +33,44 @@ LoadBalancer IPs.
 - **BGP:** Cilium BGP Control Plane enabled (`bgpControlPlane.enabled=true`),
   TCP MD5 auth (RFC 2385) enabled on Cilium↔FRR2 peering only
 - **DSR:** `loadBalancer.mode=dsr`, `loadBalancer.dsrDispatch=geneve`
-- **Tunnel:** Geneve (`tunnelProtocol=geneve`)
+- **Tunnel:** Geneve (`tunnelProtocol=geneve`) for inter-node pod-to-pod traffic
 - **Observability:** Hubble (agent, relay, UI) enabled
 - **IPAM:** Kubernetes mode (`ipam.mode=kubernetes`)
+
+## Design decisions
+
+### Single bgp-net (no bgp-kind bridge)
+
+Kind creates its own Docker bridge (`kind`) for node-to-node traffic, but
+external containers (like FRR2) cannot attach to it. The original design used
+a second bridge (`bgp-net`) for BGP peering and a second interface (`eth1`)
+on each node — but this required per-node PodCIDR static routes through the
+kind bridge, which were fragile.
+
+The fix: **make FRR2 the default gateway** for all kind nodes. This lets the
+kind bridge go away entirely — all traffic (BGP, LB, pod inter-node, apiserver)
+flows through `bgp-net` via FRR2. No static routes needed.
+
+### FRR2 as default gateway
+
+`scripts/kind-up.sh` sets FRR2 (172.19.0.10) as the default gateway on every
+kind node via `docker exec <node> ip route flush 0/0; ip route add default via 172.19.0.10`.
+FRR2 has `ip_forward=1` (via sysctl in docker-compose) and internet access
+through Docker's default bridge — so kind nodes retain outbound connectivity.
+
+### Overlay tunnel (Geneve)
+
+`tunnelProtocol=geneve`. Pod-to-pod traffic uses Geneve encapsulation over
+the kind bridge (eth0). No PodCIDR advertisement needed — traffic is
+encapsulated, not routed. Cilium needs both `eth0` (kind bridge for tunnels)
+and `eth1` (bgp-net for BGP + LB traffic) in its device list.
+
+### DSR (Direct Server Return)
+
+`loadBalancer.mode=dsr`, `loadBalancer.dsrDispatch=geneve`. Backend pods
+respond directly to the client, bypassing the load-balancer node for the
+return path. The response is Geneve-encapsulated and forwarded via FRR2
+(default gateway). This avoids a second SNAT hop at the node.
 
 ## Key files
 
@@ -42,7 +79,7 @@ LoadBalancer IPs.
 | `kind.yaml` | Cluster definition — nodes, kubeadm patches, pod/service CIDRs |
 | `docker-compose.yml` | Controller + FRR1/FRR2 BGP speakers + test client |
 | `Makefile` | Day-to-day commands (`make up`, `make frr-up`, etc.) |
-| `scripts/kind-up.sh` | Creates cluster, attaches nodes to `bgp-net`, adds DSR return routes, exports kubeconfig |
+| `scripts/kind-up.sh` | Creates cluster, attaches nodes to `bgp-net`, sets FRR2 as default gateway, exports kubeconfig |
 | `scripts/kind-down.sh` | Deletes cluster (leaves networks intact) |
 | `scripts/install-cilium.sh` | Helm-installs Cilium with BGP+Hubble+DSR+Geneve, resolves CP IP from Docker |
 | `frr/frr.conf` | FRR2 TOR-Cluster config (AS 65000, peers Cilium workers + FRR1, next-hop-self for FRR1) |
@@ -87,11 +124,11 @@ make clean               # down + remove all networks + wipe kubeconfig
 ## Cilium install details
 
 The install script (`scripts/install-cilium.sh`) resolves the control-plane
-container's IP on the Docker `bgp-kind` network and passes it as
+container's IP on the Docker `kind` bridge and passes it as
 `k8sServiceHost` so Cilium can reach the apiserver before Service IP routing
 is up.
 
-IMPORTANT: The `devices` option must list both `eth0` (kind management
+IMPORTANT: The `devices` option must list both `eth0` (kind
 network) and `eth1` (bgp-net BGP peering network). Without `eth1` in the
 device list, Cilium's eBPF programs won't intercept LoadBalancer traffic
 arriving on the BGP peering interface. `directRoutingDevice` must be set to
@@ -115,18 +152,17 @@ tunnelProtocol=geneve
 
 ## Network
 
-Four Docker bridges:
-- `bgp-kind`: kind management network (172.20.0.0/16). Kind cluster
-  node-to-node communication (apiserver, etcd, etc.).
-- `bgp-net`: server L2 segment (172.19.0.0/16). FRR2 + Cilium worker nodes.
-  Created by `net-create`; survives cluster teardown — removed by
+Three Docker bridges:
+- `bgp-net`: server L2 segment (172.19.0.0/16). FRR2 + Cilium control-plane
+  and worker nodes. FRR2 (172.19.0.10) is the default gateway for all kind
+  nodes. Created by `net-create`; survives cluster teardown — removed by
   `make clean`.
 - `transit-net`: transit L2 segment (172.23.0.0/24). FRR1 ↔ FRR2 split.
 - `client-net`: client L2 segment (172.21.0.0/24). FRR1 + test client only.
 
 Each kind node has two interfaces:
-- `eth0` on `bgp-kind` (auto-detected by Cilium as the default device)
-- `eth1` on `bgp-net` (must be explicitly added to Cilium's device list)
+- `eth0` on the `kind` bridge (auto-detected by Cilium for Geneve tunnels)
+- `eth1` on `bgp-net` (must be explicitly added to Cilium's device list for BGP + LB traffic)
 
 - Pod CIDR: `10.244.0.0/16`
 - Service CIDR: `10.96.0.0/16`
@@ -144,8 +180,8 @@ Each kind node has two interfaces:
 
 ### FRR2 TOR-Cluster (docker-compose service `frr2`, container `frr-speaker`)
 
-The border router. Dual-homed on `bgp-net` (172.19.0.10) and `transit-net`
-(172.23.0.2). AS 65000.
+The border router and default gateway for all kind nodes. Dual-homed on
+`bgp-net` (172.19.0.10) and `transit-net` (172.23.0.2). AS 65000.
 
 - **Image:** `frrouting/frr:latest` (cap_add NET_ADMIN + SYS_ADMIN,
   sysctl net.ipv4.ip_forward=1)
@@ -159,7 +195,6 @@ The border router. Dual-homed on `bgp-net` (172.19.0.10) and `transit-net`
 - **Inspect:** `docker exec frr-speaker vtysh -c "show bgp summary"`
 - **Routes (RIB):** `make frr2-routes`
 - **Routes (FIB):** `docker exec frr-speaker ip route show proto bgp`
-- See [README §BGP peering](README.md#bgp-peering) for details.
 
 ### FRR1 TOR-Client (docker-compose service `frr1`, container `frr-speaker-tor`)
 
@@ -167,26 +202,26 @@ Client-facing TOR switch. Dual-homed on `client-net` (172.21.0.10) and
 `transit-net` (172.23.0.1). AS 65100. Serves as the test client's default
 gateway. Peers only with FRR2 over transit-net (does NOT peer with Cilium,
 does NOT touch bgp-net). Advertises `network 172.21.0.0/24` to FRR2 so the
-DSR return path can reach client-net.
+return path can reach client-net.
 
 - **Config:** `frr/frr1.conf`
 - **Lifecycle:** `make frr1-up` / `make frr1-down`
 - **Inspect:** `docker exec frr-speaker-tor vtysh -c "show bgp summary"`
 - **Routes (RIB):** `make frr1-routes` (should show LB VIP via FRR2)
 
-### DSR return path
+### Default gateway
 
-The kind nodes need a static route to reach `client-net` (172.21.0.0/24) —
-without it, DSR response packets (sourced from real client IP) go out the
-default gateway (bgp-kind bridge) which doesn't know about client-net.
+FRR2 is set as the default gateway on all kind nodes instead of adding
+per-subnet static routes. Without this FRR2 handles all non-local routing:
 
 ```
-docker exec <node> ip route add 172.21.0.0/24 via 172.19.0.10 dev eth1
+docker exec <node> ip route flush 0/0
+docker exec <node> ip route add default via 172.19.0.10
 ```
 
 This is added automatically:
 - At cluster creation time (`scripts/kind-up.sh` runs it on every node)
-- By `make client-up` (via `client-route-add` target) when the client starts
+- By `make client-up` (via `client-route-add` target)
 - Re-run `make client-route-add` if kind nodes are restarted
 
 ### Test client
@@ -241,10 +276,10 @@ returns "Host is unreachable":
    # Should show 172.19.0.200/32 via 172.23.0.2
    ```
 
-4. Verify kernel DSR return route was added on kind nodes:
+4. Verify kernel return route was added on kind nodes:
    ```
-   docker exec overlay-l3-bgp-worker ip route show | grep 172.21.0.0
-   # Should show: 172.21.0.0/24 via 172.19.0.10 dev eth1
+   docker exec overlay-l3-bgp-worker ip route show | grep default
+   # Should show: default via 172.19.0.10 dev eth1 (or similar)
    ```
 
 5. Check that FRR kernel routes are installed:

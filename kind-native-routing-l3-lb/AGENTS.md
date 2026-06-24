@@ -41,6 +41,62 @@ LoadBalancer IPs.
 - **Observability:** Hubble (agent, relay, UI) enabled
 - **IPAM:** Kubernetes mode (`ipam.mode=kubernetes`)
 
+## Design decisions
+
+Architectural choices made during development and why:
+
+### Single bgp-net (no bgp-kind bridge)
+
+Kind creates its own Docker bridge (`kind`) for node-to-node traffic, but
+external containers (like FRR2) cannot attach to it. The original design used
+a second bridge (`bgp-net`) for BGP peering and a second interface (`eth1`)
+on each node — but this required per-node PodCIDR static routes through the
+kind bridge, which were fragile and unreliable.
+
+The fix: **make FRR2 the default gateway** for all kind nodes. This lets the
+kind bridge go away entirely — all traffic (BGP, LB, pod inter-node, apiserver)
+flows through `bgp-net` via FRR2. No static routes, no auto-direct-node-routes.
+
+### FRR2 as default gateway
+
+`scripts/kind-up.sh` sets FRR2 (172.19.0.10) as the default gateway on every
+kind node via `docker exec <node> ip route replace default via 172.19.0.10`.
+FRR2 has `ip_forward=1` (via sysctl in docker-compose) and internet access
+through Docker's default bridge — so kind nodes retain outbound connectivity.
+
+### Native routing (not tunnel)
+
+`routingMode=native` (not Geneve/VXLAN). Pod IPs are routable on the host
+network. No encapsulation overhead. Cilium advertises both PodCIDRs and LB
+VIPs via BGP so FRR2 can route return traffic.
+
+### SNAT (not DSR)
+
+`loadBalancer.mode=snat`. Cilium source-NATs inbound LB traffic to the
+node's IP, so the backend pod replies via the node (un-NAT happens there).
+This works with any backend regardless of kernel version or kube-proxy mode.
+DSR would avoid the SNAT hop but requires backend awareness of the client IP
+and more complex Cilium configuration.
+
+### Single Cilium device
+
+`devices={eth1}` only. With FRR2 as the only upstream, Cilium only needs
+eBPF programs on `bgp-net` (eth1). No `directRoutingDevice` needed.
+
+### autoDirectNodeRoutes is unreliable
+
+`autoDirectNodeRoutes=true` in Cilium Helm values does NOT reliably install
+inter-node PodCIDR routes — the actual state can show `false` despite the
+setting. This was a root cause of intermittent curl failures in an earlier
+version. Solution: no static routes needed at all (FRR2 is the default
+gateway and handles inter-node routing).
+
+### No tunnel in the CNI, no kube-proxy
+
+- kindnet is disabled; Cilium is the sole CNI
+- kube-proxy is disabled (strict eBPF replacement)
+- No overlay tunnel — native routing end-to-end
+
 ## Key files
 
 | File | Role |
@@ -263,6 +319,102 @@ returns "Host is unreachable":
   FRR1 learns an unreachable worker IP (172.19.0.x, on a different L2) as
   the next-hop.
 - Confirm `no bgp ebgp-requires-policy` is set in both FRR configs.
+
+### Cilium daemonset stuck (CP pod Pending)
+
+If a Cilium pod on the control-plane is stuck in `Pending` after re-install,
+check for an old pod in `Terminating` state:
+
+```
+kubectl -n kube-system get pods | grep cilium
+```
+
+The old pod's podAntiAffinity blocks scheduling the new one. Force-delete
+from the kubelet (the CP node itself):
+
+```
+docker exec overlay-l3-bgp-control-plane kubectl --kubeconfig /etc/kubernetes/admin.conf delete pod -n kube-system <old-cilium-pod> --force --grace-period=0
+```
+
+### Control-plane NotReady after force-delete
+
+Force-deleting a Cilium pod on the CP can corrupt containerd's bolt metadata
+database. Symptoms: `kubectl get nodes` shows CP `NotReady`, containerd logs
+show `failed to recover state: sandbox not found`.
+
+Fix (on the CP container):
+```
+docker exec overlay-l3-bgp-control-plane systemctl stop containerd
+docker exec overlay-l3-bgp-control-plane rm -f /var/lib/containerd/io.containerd.metadata.v1.bolt/meta.db
+docker exec overlay-l3-bgp-control-plane systemctl start containerd
+```
+
+### Cilium re-install fails (cilium-secrets namespace stuck)
+
+`cilium-secrets` namespace can get stuck in `Terminating` after `helm uninstall`.
+Wait for it to fully disappear before retrying `make cilium-install`:
+
+```
+kubectl get namespace cilium-secrets -o json | jq 'del(.spec.finalizers[])' | kubectl replace --raw /api/v1/namespaces/cilium-secrets/finalize -f -
+```
+
+(Or just wait 10-15 seconds.)
+
+### Cilium BGP session won't establish
+
+- TCP MD5 mismatch failure mode: `dial: i/o timeout` (silently drops SYN).
+  Verify password match between k8s Secret and `frr/frr.conf`.
+- Check FRR is running: `docker exec frr-speaker vtysh -c "show bgp summary"`.
+- Check `bgp-net` connectivity: `docker exec overlay-l3-bgp-worker ping 172.19.0.10`.
+- Verify Cilium's device list includes `eth1` on the worker (`Devices: eth1 172.19.x.x`).
+
+### Helm value gotchas
+
+- `loadBalancer.mode=snat` (lowercase `snat`, not `sNat` or `SNAT`)
+- `routingMode=native` (not `tunnelProtocol=disabled`)
+- `ipv4NativeRoutingCIDR=10.244.0.0/16` is **required** with native routing
+
+## Verification checklist
+
+After `make up`, verify the full path end-to-end:
+
+```
+# 1. Cluster is healthy
+make status
+kubectl get nodes -o wide
+
+# 2. Cilium daemonset fully rolled out
+kubectl -n kube-system get pods | grep cilium
+# Should show 3/3 cilium-agent pods, all Running
+
+# 3. Cilium device list is correct
+kubectl exec -n kube-system ds/cilium -- cilium-dbg status --verbose | grep Devices
+# Expected: Devices: eth1 172.19.x.x
+
+# 4. BGP sessions are Established
+make frr-status
+# State: Established for both workers + FRR1
+
+# 5. FRR2 RIB has PodCIDRs + LB VIP
+make frr2-routes
+# Should show 10.244.1.0/24, 10.244.2.0/24, 172.19.0.200/32
+
+# 6. FRR1 RIB has LB VIP via FRR2
+make frr1-routes
+# Should show 172.19.0.200/32 via 172.23.0.2
+
+# 7. Kernel routes installed on FRR2
+docker exec frr-speaker ip route show proto bgp
+
+# 8. Worker routing is clean (no static routes)
+docker exec overlay-l3-bgp-worker ip route show | grep "^default"
+# default via 172.19.0.10 dev eth1
+docker exec overlay-l3-bgp-worker ip route show | grep 10.244
+# Shows local PodCIDR via cilium_host AND remote via 172.19.0.10
+
+# 9. End-to-end: curl LB VIP from test-client
+make client-test
+# Should return HTTP 200
 ```
 </content>
 </invoke>

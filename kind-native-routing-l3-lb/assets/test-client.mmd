@@ -5,7 +5,7 @@ graph LR
     end
     F1 -->|transit-net eBGP| F2
     subgraph TN["transit-net 172.23.0.0/24"]
-        F2[FRR2 TOR-Cluster<br/>AS 65000<br/>172.23.0.2]
+        F2[FRR2 TOR-Cluster<br/>AS 65000<br/>172.23.0.2<br/>default gateway for nodes]
     end
     subgraph BN["bgp-net 172.19.0.0/16"]
         F2
@@ -18,3 +18,5 @@ graph LR
     F2 -->|eBGP ECMP| WK2
     WK -.->|advertise 172.19.0.200/32| F2
     WK2 -.->|advertise 172.19.0.200/32| F2
+    WK -->|default gateway| F2
+    WK2 -->|default gateway| F2
