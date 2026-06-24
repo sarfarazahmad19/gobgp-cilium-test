@@ -1,0 +1,34 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: overlay-l3-bgp
+
+# Use the latest pre-built kind node image. kind v0.32.0 ships node images
+# for v1.33.12, v1.34.8, v1.35.5, v1.36.1. Pin a digest for reproducibility
+# when desired.
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.33.0
+    extraPortMappings:
+      # kube-apiserver on a fixed host port (localhost only).
+      - containerPort: 6443
+        hostPort: 6443
+        listenAddress: "127.0.0.1"
+        protocol: tcp
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-ip: 0.0.0.0
+  - role: worker
+    image: kindest/node:v1.33.0
+  - role: worker
+    image: kindest/node:v1.33.0
+
+networking:
+  # Cilium will provide the CNI and replace kube-proxy. The default CNI
+  # (kindnet) and kube-proxy are disabled so cilium can take over cleanly.
+  disableDefaultCNI: true
+  kubeProxyMode: none
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"

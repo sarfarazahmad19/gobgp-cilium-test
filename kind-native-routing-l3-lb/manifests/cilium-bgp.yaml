@@ -1,0 +1,79 @@
+---
+# CiliumBGPPeerConfig — default peer configuration with TCP MD5 auth (RFC 2385).
+# Referenced by CiliumBGPClusterConfig peers via peerConfigRef.
+ # The authSecretRef points to a k8s Secret in the BGP secrets namespace
+# (default: kube-system) that must contain a key named `password` with the
+# shared MD5 key. On the FRR side, the matching key is set in
+# frr/frr.conf as `neighbor <addr> password "..."` under each neighbor block.
+# Create the secret with: make bgp-auth-secret
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: overlay-l3-bgp-default
+spec:
+  ebgpMultihop: 1
+  authSecretRef: bgp-auth
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"
+
+---
+# CiliumBGPClusterConfig — instructs Cilium's BGP Control Plane to instantiate
+# a BGP router on worker nodes only (control-plane is excluded — it runs
+# management functions, not data-plane). Each worker peers with the FRR
+# speaker at 172.19.0.10 (AS 65000).
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: overlay-l3-bgp-bgp
+spec:
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+  bgpInstances:
+    - name: overlay-l3-bgp-instance
+      localASN: 65001
+      peers:
+        - name: overlay-l3-bgp-speaker
+          peerASN: 65000
+          peerAddress: "172.19.0.10"
+          peerConfigRef:
+            name: overlay-l3-bgp-default
+
+---
+# CiliumBGPAdvertisement — advertise LoadBalancer Service IPs and PodCIDRs
+# to the FRR peer.
+#
+# In native routing mode (routingMode=native), pods are routed directly
+# on the host network. FRR (and any other router) must know how to reach
+# pod IPs, otherwise the return path for pod-initiated connections (e.g.
+# a pod reaching out to client-net) cannot find the pod again.
+#
+# Without the PodCIDR advertisement, FRR would have no route to 10.244.x.x
+# and return traffic would be dropped.
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: overlay-l3-bgp-advert
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    # Advertise per-node pod CIDR slices (e.g. 10.244.1.0/24, 10.244.2.0/24)
+    # so FRR can route return traffic to specific pods. No selector needed
+    # — Cilium automatically advertises all pod CIDRs allocated to the node.
+    - advertisementType: PodCIDR
+    # Advertise LoadBalancer service IPs (including those assigned by Cilium).
+    # NOTE: selector is required — without it no services match. The NotIn
+    # expression below matches ALL services (a documented Cilium idiom).
+    - advertisementType: Service
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchExpressions:
+          - {key: somekey, operator: NotIn, values: ['never-used-value']}

@@ -1,0 +1,46 @@
+graph LR
+    subgraph R1["Rack 1"]
+        subgraph CN["client-net 172.21.0.0/24"]
+            CL["test-client
+                Alpine
+                172.21.0.100
+                curl 172.19.0.200"]
+            F1["FRR1 TOR-Client
+                bgpd+zebra ip_forward
+                AS 65100
+                172.21.0.10 / 172.23.0.1"]
+        end
+    end
+
+    F1 ==>|transit-net 172.23.0.0/24 eBGP| F2
+
+    subgraph R2["Rack 2"]
+        subgraph BN["bgp-net 172.19.0.0/16"]
+            F2["FRR2 TOR-Cluster
+                bgpd+zebra ip_forward
+                AS 65000
+                172.19.0.10 / 172.23.0.2
+                next-hop-self"]
+            CP["K8s Control Plane
+                172.19.0.3
+                no BGP"]
+            WK["K8s Worker 1
+                172.19.0.4
+                Cilium BGP CP AS 65001
+                pod: 10.244.1.5"]
+            WK2["K8s Worker 2
+                172.19.0.5
+                Cilium BGP CP AS 65001
+                pod: 10.244.2.7"]
+            LB["LB VIP
+                172.19.0.200/32"]
+        end
+    end
+
+    F2 ==>|eBGP ECMP| WK
+    F2 ==>|eBGP ECMP| WK2
+
+    WK -.->|advertise 172.19.0.200/32| F2
+    WK2 -.->|advertise 172.19.0.200/32| F2
+
+    CL -.->|default gateway| F1
