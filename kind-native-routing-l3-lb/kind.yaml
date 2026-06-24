@@ -20,6 +20,11 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-ip: 0.0.0.0
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          certSANs:
+            - 172.19.0.3
   - role: worker
     image: kindest/node:v1.33.0
   - role: worker

@@ -6,7 +6,7 @@ set -eu
 KUBECONFIG="${KUBECONFIG:-./.kubeconfig/kubeconfig.yaml}"
 CP_CONTAINER="${CP_CONTAINER:-overlay-l3-bgp-control-plane}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.19.5}"
-KIND_NETWORK="${KIND_NETWORK:-bgp-kind}"
+KIND_NETWORK="${KIND_NETWORK:-bgp-net}"
 
 log() { printf "[install-cilium] %s\n" "$*"; }
 
