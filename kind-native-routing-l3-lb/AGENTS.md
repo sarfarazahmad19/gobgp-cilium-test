@@ -135,7 +135,7 @@ make frr-up              # start both FRR speakers (FRR1 + FRR2)
 
 make status              # check cluster health
 make cilium-status       # quick Cilium health check
-make frr-status          # FRR2 BGP summary (alias for frr2-status)
+make frr2-status          # FRR2 BGP summary
 make frr1-status         # FRR1TOR-Client BGP summary
 make frr2-routes         # FRR2 RIB (routes from Cilium)
 make frr1-routes         # FRR1 RIB (routes from FRR2)
@@ -200,7 +200,7 @@ Each kind node has a single host-facing interface:
 
 ## FRR BGP speakers
 
-### FRR2 TOR-Cluster (docker-compose service `frr2`, container `frr-speaker`)
+### FRR2 TOR-Cluster (docker-compose service `frr2`, container `frr-speaker-cluster`)
 
 The border router and default gateway for all kind nodes. Dual-homed on
 `bgp-net` (172.19.0.10) and `transit-net` (172.23.0.2). AS 65000.
@@ -214,9 +214,9 @@ The border router and default gateway for all kind nodes. Dual-homed on
   FRR1 would learn unreachable Cilium worker IPs as next-hops). Uses
   `timers 3 9` for faster Cilium failover (default 90s hold).
 - **Lifecycle:** `make frr-up` / `make frr2-up` / `make frr-down` / `make frr2-down`
-- **Inspect:** `docker exec frr-speaker vtysh -c "show bgp summary"`
+- **Inspect:** `docker exec frr-speaker-cluster vtysh -c "show bgp summary"`
 - **Routes (RIB):** `make frr2-routes`
-- **Routes (FIB):** `docker exec frr-speaker ip route show proto bgp`
+- **Routes (FIB):** `docker exec frr-speaker-cluster ip route show proto bgp`
 - See [README §BGP peering](README.md#bgp-peering) for details.
 
 ### FRR1 TOR-Client (docker-compose service `frr1`, container `frr-speaker-tor`)
@@ -273,7 +273,7 @@ returns "Host is unreachable":
 
 2. Check BGP peering on FRR2:
    ```
-   make frr-status
+   make frr2-status
    # State should be "Established" for both Cilium workers + FRR1
    ```
 
@@ -299,7 +299,7 @@ returns "Host is unreachable":
 
 6. Check that FRR kernel routes are installed:
    ```
-   docker exec frr-speaker ip route show proto bgp
+   docker exec frr-speaker-cluster ip route show proto bgp
    docker exec frr-speaker-tor ip route show proto bgp
    ```
 
@@ -364,7 +364,7 @@ kubectl get namespace cilium-secrets -o json | jq 'del(.spec.finalizers[])' | ku
 
 - TCP MD5 mismatch failure mode: `dial: i/o timeout` (silently drops SYN).
   Verify password match between k8s Secret and `frr/frr.conf`.
-- Check FRR is running: `docker exec frr-speaker vtysh -c "show bgp summary"`.
+- Check FRR is running: `docker exec frr-speaker-cluster vtysh -c "show bgp summary"`.
 - Check `bgp-net` connectivity: `docker exec overlay-l3-bgp-worker ping 172.19.0.10`.
 - Verify Cilium's device list includes `eth1` on the worker (`Devices: eth1 172.19.x.x`).
 
@@ -392,7 +392,7 @@ kubectl exec -n kube-system ds/cilium -- cilium-dbg status --verbose | grep Devi
 # Expected: Devices: eth1 172.19.x.x
 
 # 4. BGP sessions are Established
-make frr-status
+make frr2-status
 # State: Established for both workers + FRR1
 
 # 5. FRR2 RIB has PodCIDRs + LB VIP
@@ -404,7 +404,7 @@ make frr1-routes
 # Should show 172.19.0.200/32 via 172.23.0.2
 
 # 7. Kernel routes installed on FRR2
-docker exec frr-speaker ip route show proto bgp
+docker exec frr-speaker-cluster ip route show proto bgp
 
 # 8. Worker routing is clean (no static routes)
 docker exec overlay-l3-bgp-worker ip route show | grep "^default"

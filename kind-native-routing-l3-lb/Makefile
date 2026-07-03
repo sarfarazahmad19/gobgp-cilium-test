@@ -105,7 +105,7 @@ BGP_AUTH_PASSWORD ?= bgp-md5-secret-2026
 
 .PHONY: frr-up frr-down client-up client-down client-route-add client-test bgp-apply bgp-auth-secret lb-pool-apply svc-apply
 
-FRR2_CONTAINER  ?= frr-speaker
+FRR2_CONTAINER  ?= frr-speaker-cluster
 FRR1_CONTAINER  ?= frr-speaker-tor
 FRR2_IP         ?= 172.19.0.10
 
@@ -175,10 +175,6 @@ lb-pool-apply: ## Apply CiliumLoadBalancerIPPool for LB IPAM
 
 svc-apply: ## Apply the sample LoadBalancer Service + Deployment (go-httpbin)
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/svc-lb.yaml
-
-frr-status: frr2-status ## Show FRR border BGP neighbor state (alias for frr2-status)
-
-frr-routes: frr2-routes ## Show routes learned by FRR border (alias for frr2-routes)
 
 frr2-status: ## Show FRR border BGP neighbor state
 	@docker exec $(FRR2_CONTAINER) vtysh -c "show bgp summary" 2>/dev/null || \

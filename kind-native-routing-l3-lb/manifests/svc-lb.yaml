@@ -10,8 +10,8 @@
 # The `CiliumBGPAdvertisement/overlay-l3-bgp-advert` (in cilium-bgp.yaml) then
 # advertises that IP to the FRR2 (TOR-Cluster) speaker at 172.19.0.10. Verify with:
 #   kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml get svc test-lb
-#   make frr-routes
-#   docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"
+#   make frr2-routes
+#   docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"
 #
 # The Deployment below creates nginx pods matching the `app: test` selector,
 # so applying this file gives you a working end-to-end setup. Without

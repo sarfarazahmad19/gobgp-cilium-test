@@ -50,8 +50,8 @@ make up
 # Check it's all healthy
 make status
 make cilium-status
-make frr-status    # FRR2 TOR-Cluster BGP summary
-make frr-routes    # FRR2 TOR-Cluster RIB
+make frr2-status    # FRR2 TOR-Cluster BGP summary
+make frr2-routes    # FRR2 TOR-Cluster RIB
 make frr1-routes   # FRR1 TOR-Client RIB (LB VIP should appear here too)
 
 # Open Hubble UI
@@ -81,8 +81,6 @@ make hubble-ui
   make bgp-auth-secret  Create/update the k8s TCP MD5 secret
   make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
   make svc-apply       Apply the sample LoadBalancer Service + Deployment
-  make frr-status      Show FRR TOR-Cluster BGP summary (alias for frr2-status)
-  make frr-routes      Show FRR TOR-Cluster RIB (alias for frr2-routes)
   make frr1-status     Show FRR TOR-Client BGP summary
   make frr1-routes     Show FRR TOR-Client RIB
   make frr2-status     Show FRR TOR-Cluster BGP summary
@@ -121,10 +119,10 @@ make hubble-ui
       overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  (BGP CP excluded)
       overlay-l3-bgp-worker         172.19.0.4  AS 65001  Cilium BGP CP
       overlay-l3-bgp-worker2        172.19.0.5  AS 65001  Cilium BGP CP
-      frr2 TOR-Cluster (frr-speaker)     172.19.0.10 AS 65000  bgpd+zebra, default gateway
+      frr2 TOR-Cluster (frr-speaker-cluster)     172.19.0.10 AS 65000  bgpd+zebra, default gateway
 
     transit-net (172.23.0.0/24):
-      frr2 TOR-Cluster (frr-speaker)     172.23.0.2  AS 65000
+      frr2 TOR-Cluster (frr-speaker-cluster)     172.23.0.2  AS 65000
       frr1 TOR-Client (frr-speaker-tor)    172.23.0.1  AS 65100
 
     client-net (172.21.0.0/24):
@@ -189,7 +187,7 @@ kubectl get svc test-lb
 # EXTERNAL-IP column should be 172.19.0.200 (not <pending>)
 
 # 3. Check FRR2 (TOR-Cluster) learned the route from Cilium
-make frr-routes         # alias for make frr2-routes
+make frr2-routes         # show FRR2 TOR-Cluster RIB
 # → 172.19.0.200/32 via 172.19.0.4 and 172.19.0.5 (ECMP next-hops)
 
 # 4. Check FRR1 (TOR-Client) learned the route from FRR2
@@ -197,11 +195,11 @@ make frr1-routes
 # → 172.19.0.200/32 via 172.23.0.2 (next-hop = FRR2 TOR-Cluster on transit-net)
 
 # 5. Verify kernel routes on both FRRs
-docker exec frr-speaker ip route show proto bgp
+docker exec frr-speaker-cluster ip route show proto bgp
 docker exec frr-speaker-tor ip route show proto bgp
 
 # 6. Test HTTP reachability from FRR2 (TOR-Cluster) — direct bgp-net access
-docker exec frr-speaker wget -q -O- http://172.19.0.200 | head -5
+docker exec frr-speaker-cluster wget -q -O- http://172.19.0.200 | head -5
 ```
 
 The route is advertised even without matching pods — BGP is "up" but traffic
@@ -242,7 +240,7 @@ dropped/refused. BGP looks "up", the service is a black hole.
   ```sh
   make svc-apply   # or: kubectl apply -f manifests/svc-lb.yaml
   ```
-  Re-check `make frr-routes` and curl the VIP from the test client.
+  Re-check `make frr2-routes` and curl the VIP from the test client.
 
 **How to make BGP honestly reflect endpoint health (advanced, optional):**
 - `externalTrafficPolicy: Local` on the Service: a node withdraws its route
@@ -258,7 +256,7 @@ side.
 ### F2. ECMP next-hops from both nodes is by design
 
 **What we saw:**
-- `docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"` shows the
+- `docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"` shows the
   same Service prefix with two next-hops: `172.19.0.4` and `172.19.0.5`.
 
 **Why:** Every node in the cluster runs a Cilium BGP instance
@@ -286,14 +284,14 @@ Three checks, in order of usefulness:
 
 2. **BGP session is established:**
    ```sh
-   make frr-status
+   make frr2-status
    # Each neighbor's state should be "Established"
    ```
 
 3. **Route is in FRR's RIB:**
    ```sh
-   make frr-routes
-   # or: docker exec frr-speaker vtysh -c "show bgp ipv4 unicast"
+   make frr2-routes
+   # or: docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"
    ```
    Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
    `bgp-net` (`172.19.0.4` / `172.19.0.5`).
