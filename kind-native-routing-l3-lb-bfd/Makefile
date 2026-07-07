@@ -158,6 +158,9 @@ client-test: ## Curl the LB VIP from the test client (verifies FRR forwarding)
 	docker exec test-client sh -c 'curl -s http://172.19.0.200 | head -20'
 
 kuberouter-apply: ## Apply kube-router DaemonSet (BGP + BFD speaker, no service proxy / firewall)
+	@for node in $$(kubectl --kubeconfig $(KUBECONFIG) get nodes -o name 2>/dev/null | grep -v control-plane); do \
+	  kubectl --kubeconfig $(KUBECONFIG) annotate $$node kube-router.io/node.asn=65001 --overwrite; \
+	done
 	kubectl --kubeconfig $(KUBECONFIG) apply -f manifests/kube-router.yaml
 	kubectl --kubeconfig $(KUBECONFIG) -n kube-system rollout status ds/kube-router --timeout=120s
 
@@ -213,6 +216,10 @@ frr1-status: ## Show FRR TOR BGP neighbor state
 
 frr1-routes: ## Show routes in FRR TOR RIB (should see LB VIP via FRR2)
 	@docker exec $(FRR1_CONTAINER) vtysh -c "show bgp ipv4 unicast" 2>/dev/null || \
+	  echo "FRR TOR not running — try 'make frr1-up' first"
+
+frr1-route-fib: ## Show FRR TOR kernel FIB (BGP-installed routes)
+	@docker exec $(FRR1_CONTAINER) ip route show proto bgp 2>/dev/null || \
 	  echo "FRR TOR not running — try 'make frr1-up' first"
 
 ## ---- debug ----------------------------------------------------------

@@ -1,33 +1,59 @@
-# bgp-kind-cilium
+# bgp-kind-cilium-bfd
 
-Local BGP networking lab using Cilium in **native routing mode** (no overlay
-tunnel) with BGP Control Plane, peered with an external BGP speaker over a
-shared Docker network.
+Local BGP networking lab using Cilium in **native routing mode** with
+**kube-router as the BGP+BFD speaker** peered with an external FRR border
+router. This lab is a sibling of
+[`../kind-native-routing-l3-lb`](../kind-native-routing-l3-lb/README.md)
+but replaces Cilium's own BGP Control Plane with **kube-router** so we
+get **sub-second link-failure detection via BFD** — something Cilium BGP
+does not support in 1.19.x.
 
 ![Topology diagram](assets/topology.png)
 
-Traffic flow (native routing end-to-end, no tunnel):
-1. client → FRR1 (default gateway)
+Traffic flow (native routing end-to-end, no tunnel, BFD-monitored):
+1. `test-client` → FRR1 (default gateway)
 2. FRR1 → FRR2 (transit-net eBGP)
-3. FRR2 → Cilium node (bgp-net eBGP ECMP)
+3. FRR2 → Cilium node (bgp-net eBGP ECMP — two next-hops from kube-router on the two workers)
 4. Cilium SNAT → backend pod (direct host-network routing, no Geneve)
 5. response via SNAT un-NAT → FRR2 (default gateway) → FRR1 → client
 
-## What this does
+## What this does (vs the sibling lab)
 
-- Spins up a 2-node Kubernetes cluster (v1.33) using [kind][kind]
-- Replaces the default CNI and kube-proxy with Cilium (eBPF), using
-  **native routing** — no Geneve/VXLAN tunnel, Pod IPs are directly routable
-- Enables Cilium's BGP Control Plane (AS 65001) to advertise LoadBalancer
-  Service IPs and PodCIDRs via BGP
-- Uses Cilium's LB IPAM (`CiliumLoadBalancerIPPool`, range 172.19.0.200-220) to
-  allocate LoadBalancer IPs — creating a `type: LoadBalancer` Service
-  automatically produces a route in FRR's RIB
-- Runs two FRR instances: **FRR2 (TOR-Cluster, AS 65000)** peers with Cilium on
-  every node, while **FRR1 (TOR-Client, AS 65100)** acts as the test client's default
-  gateway. FRR ships bgpd+zebra together, so routes are installed into the
-  kernel FIB for local reachability.
-- Ships with Hubble for observability (UI, relay, agent)
+The same overall topology, the same Cilium datapath, the same LB IPAM
+pool — only the **K8s-side BGP speaker** changes:
+
+| Concern                  | Sibling (`kind-native-routing-l3-lb`) | This lab (`-bfd`)                        |
+|--------------------------|---------------------------------------|------------------------------------------|
+| K8s-side BGP speaker     | Cilium BGP Control Plane              | **kube-router** DaemonSet                |
+| BFD support              | ✗ (Cilium 1.19.x has none)            | ✓ (GoBGP backend in kube-router)         |
+| Failover bound           | BGP hold timer (9s tuned)             | BFD detect time (~900ms with 300×3)      |
+| Routes advertised        | LB VIP + per-node PodCIDR             | LB VIP + per-node PodCIDR (same)          |
+| CRDs for BGP             | `CiliumBGPClusterConfig`/`PeerConfig`/`Advertisement` | none — kube-router uses CLI flags |
+| TCP MD5 auth on Cilium→FRR2 | ✓ (k8s `bgp-auth` Secret + `authSecretRef`) | ✗ dropped for first iteration — see [§Auth](#authentication-tcp-md5) |
+| Cilium Helm `bgpControlPlane.enabled` | `true`                  | **`false`**                               |
+
+Everything else — IP layout, FRR1, FRR2, test client, Cilium native-routing
++ SNAT + LB IPAM — is identical to the sibling lab. See
+[`../kind-native-routing-l3-lb/README.md`](../kind-native-routing-l3-lb/README.md)
+for the underlying design rationale.
+
+## What is Cilium vs kube-router responsible for?
+
+| Concern                          | Component   | Mechanism                                                |
+|----------------------------------|-------------|----------------------------------------------------------|
+| Pod-to-pod routing (native)      | Cilium      | eBPF datapath. `routingMode: native`, no encapsulation.  |
+| kube-proxy replacement            | Cilium      | `kubeProxyReplacement: true` — eBPF service routing     |
+| Service LoadBalancer IP allocation | Cilium LB IPAM | `CiliumLoadBalancerIPPool` — VIP written to `.status.loadBalancer.ingress` |
+| Inbound traffic NAT              | Cilium      | `loadBalancer.mode: snat` — source-NAT to node IP        |
+| BGP peering + BFD                | kube-router | `--enable-bfd` GoBGP backend; peers with FRR2 at 172.19.0.10 |
+| PodCIDR advertisement            | kube-router | `--advertise-pod-cidr` — reads `Node.spec.podCIDR`       |
+| LB VIP advertisement             | kube-router | `--advertise-loadbalancer-ip` — reads Service status     |
+| L3 load balancing (ECMP)        | FRR2 (TOR)  | Multiple `/32` BGP routes from workers → equal-cost next-hops |
+| Forwarding + return path         | FRR2        | `ip_forward=1`, default gateway for kind nodes           |
+
+Cilium's BGP Control Plane is **disabled here** (`bgpControlPlane.enabled=false`).
+It would otherwise conflict with kube-router for the same peer (FRR2) on
+the same port (179).
 
 ## Prerequisites
 
@@ -39,63 +65,75 @@ Traffic flow (native routing end-to-end, no tunnel):
 | helm    | 3.x             | Install Cilium                 |
 | make    | (any)           | Orchestrate lifecycle          |
 
-Install kind: https://kind.sigs.k8s.io/docs/user/quick-start/#installation
-
 ## Quick start
 
 ```sh
-# Bring up the full lab (cluster + Cilium + BGP auth secret + CRDs + both FRR speakers)
+# Bring up the full lab (cluster + Cilium + kube-router + LB pool + both FRR speakers + test client)
 make up
 
-# Check it's all healthy
+# Bring-up sanity checks
 make status
 make cilium-status
-make frr2-status    # FRR2 TOR-Cluster BGP summary
-make frr2-routes    # FRR2 TOR-Cluster RIB
-make frr1-routes   # FRR1 TOR-Client RIB (LB VIP should appear here too)
+make kuberouter-status
+make frr2-status     # FRR2 BGP summary (worker peers Established + FRR1)
+make frr2-bfd        # FRR2 BFD peer state — should show Up for both workers
+make frr2-routes     # FRR2 RIB — should show PodCIDRs + LB VIP (ECMP next-hops)
+make frr1-routes     # LB VIP should appear via FRR2 in FRR1's RIB too
 
-# Open Hubble UI
+# Hubble UI for in-cluster observability
 make hubble-ui
 # Visit http://localhost:12000
+
+# End-to-end
+make client-test
+# → curl 172.19.0.200 from test-client, expect HTTP 200
 ```
 
 ## Make targets
 
 ```
-  make up              Full bring-up: cluster + cilium + auth + BGP CRDs + both FRR speakers + test client
-  make cluster-up      Bring up just the kind cluster (no cilium/frr)
-  make down            Tear down the kind cluster (also stops frr speaker and test client)
-  make status          Show cluster nodes, containers, networks
-  make ps              Show running containers
-  make logs            Tail controller logs
+  make up                Full bring-up: cluster + cilium + kube-router + LB pool + Service + both FRR speakers + test client
+  make cluster-up        Bring up just the kind cluster (no cilium/kube-router/frr)
+  make down              Tear down the kind cluster (also stops frr speakers and test client)
+  make status            Show cluster nodes, containers, networks
+  make ps                Show running containers
+  make logs              Tail controller logs
 
-  make cilium-install  Install or upgrade Cilium via Helm
-  make cilium-status   Run `cilium status --brief`
-  make hubble-ui       Port-forward Hubble UI to :12000
+  make cilium-install    Install or upgrade Cilium via Helm
+  make cilium-status     Run `cilium status --brief`
+  make hubble-ui         Port-forward Hubble UI to :12000
 
-  make frr-up          Start both FRR speakers (TOR-Client + TOR-Cluster)
-  make frr1-up         Start FRR TOR-Client only
-  make frr2-up         Start FRR TOR-Cluster only
-  make frr-down        Stop both FRR speakers
-  make bgp-apply     Apply Cilium BGP CRDs to the cluster
-  make bgp-auth-secret  Create/update the k8s TCP MD5 secret
-  make lb-pool-apply   Apply CiliumLoadBalancerIPPool for LB IPAM
-  make svc-apply       Apply the sample LoadBalancer Service + Deployment
-  make frr1-status     Show FRR TOR-Client BGP summary
-  make frr1-routes     Show FRR TOR-Client RIB
-  make frr2-status     Show FRR TOR-Cluster BGP summary
-  make frr2-routes     Show FRR TOR-Cluster RIB
+  make kuberouter-apply   Apply kube-router DaemonSet (BGP+BFD speaker)
+  make kuberouter-status  Show DaemonSet + pods
+  make kuberouter-logs    Tail kube-router logs
+  make kuberouter-bgp     Show BGP neighbors from inside a kube-router pod
+  make kuberouter-bfd     Hint about where BFD state lives (often FRR side)
 
-  make client-up       Start the test client
-  make client-down     Stop the test client
-  make client-test     Curl the LB VIP from the test client
+  make frr-up            Start both FRR speakers (TOR + border)
+  make frr1-up           Start FRR TOR-Client only
+  make frr2-up           Start FRR TOR-Cluster only (with BFD enabled)
+  make frr-down          Stop both FRR speakers
+  make frr1-status       Show FRR1 BGP summary
+  make frr1-routes       Show FRR1 RIB
+  make frr2-status       Show FRR2 BGP summary
+  make frr2-routes       Show FRR2 RIB (routes from kube-router)
+  make frr2-bfd          Show FRR2 BFD peer state (sub-second failover signal)
+  make frr2-bfd-counter  Show FRR2 BFD brief counters
+  make frr2-route-fib    Show FRR2 kernel FIB (BGP-installed routes)
+
+  make lb-pool-apply     Apply CiliumLoadBalancerIPPool for LB IPAM
+  make svc-apply         Apply the sample LoadBalancer Service + Deployment
+
+  make client-up         Start the test client
+  make client-down       Stop the test client
+  make client-test       Curl the LB VIP from the test client
   make client-route-add  Add client-net default route via FRR1
 
-  make net-create      Create the shared bgp-net, transit-net, client-net networks
-  make net-rm          Remove all networks
+  make net-create        Create the shared bgp-net, transit-net, client-net networks
+  make net-rm            Remove all networks
 
-  make clean           Tear down cluster + remove network + wipe kubeconfig
-  make kubeconfig      Print path to kubeconfig
+  make clean             Tear down cluster + remove network + wipe kubeconfig
+  make kubeconfig        Print path to kubeconfig
 ```
 
 ## Network layout
@@ -116,10 +154,10 @@ make hubble-ui
   L2 segments and participants:
 
     bgp-net (172.19.0.0/16):
-      overlay-l3-bgp-control-plane  172.19.0.3  AS 65001  (BGP CP excluded)
-      overlay-l3-bgp-worker         172.19.0.4  AS 65001  Cilium BGP CP
-      overlay-l3-bgp-worker2        172.19.0.5  AS 65001  Cilium BGP CP
-      frr2 TOR-Cluster (frr-speaker-cluster)     172.19.0.10 AS 65000  bgpd+zebra, default gateway
+      overlay-l3-bgp-bfd-control-plane  172.19.0.3  (BGP CP N/A — kube-router excluded from CP)
+      overlay-l3-bgp-bfd-worker         172.19.0.4  AS 65001  kube-router (BGP+BFD)
+      overlay-l3-bgp-bfd-worker2        172.19.0.5  AS 65001  kube-router (BGP+BFD)
+      frr2 TOR-Cluster (frr-speaker-cluster)     172.19.0.10 AS 65000  bgpd+bfdd+zebra, default gateway
 
     transit-net (172.23.0.0/24):
       frr2 TOR-Cluster (frr-speaker-cluster)     172.23.0.2  AS 65000
@@ -130,439 +168,241 @@ make hubble-ui
       test-client                   172.21.0.100          curl LB VIP
 ```
 
-## BGP peering
+## BGP + BFD peering
 
 Two FRR instances form a two-hop BGP path from the client to the K8s
-cluster:
+cluster. The K8s side runs kube-router (one pod per worker) as the
+BGP+BFD speaker — Cilium's own BGP Control Plane is disabled.
 
-- **FRR2 (TOR-Cluster, AS 65000)**: peers with Cilium's BGP Control Plane on
-  each kind node over `bgp-net`. Learns LB VIP routes and installs them
-  into the kernel FIB via zebra.
-- **FRR1 (TOR-Client, AS 65100)**: peers with FRR2 only. Advertises `client-net`
-  (172.21.0.0/24) to FRR2 for the return path and learns the LB VIP
-  from FRR2.
-
-LB VIP propagation:
 ```
-Cilium (AS 65001) ──→ FRR2 TOR-Cluster (AS 65000) ──→ FRR1 TOR-Client (AS 65100) ──→ FIB
+kube-router @ worker  172.19.0.4 ─┐
+kube-router @ worker2 172.19.0.5 ─┴─► FRR2 (AS 65000) ──► FRR1 (AS 65100) ──► test-client
+                   AS 65001  BFD       TOR-Cluster            TOR-Client
 ```
 
-### Manifests (`manifests/cilium-bgp.yaml`)
+### BGP peering (kube-router → FRR2)
 
-| Resource | Purpose |
-|----------|---------|
-| `CiliumBGPPeerConfig/overlay-l3-bgp-default` | Peer settings + IPv4 families with ad selector `advertise: bgp` |
-| `CiliumBGPClusterConfig/overlay-l3-bgp-bgp` | BGP instance AS 65001, peer to 172.19.0.10 AS 65000 |
-| `CiliumBGPAdvertisement/overlay-l3-bgp-advert` | Labeled `advertise: bgp`; advertises Service LoadBalancerIP |
-| `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool` | IP pool 172.19.0.200-220 for LB Service IP allocation (`cilium-lb-pool.yaml`) |
+- **kube-router** (`manifests/kube-router.yaml`): one DaemonSet pod per worker.
+  Args: `--peer-router=172.19.0.10 --peer-asn=65000 --cluster-asn=65001
+  --enable-bfd=true --advertise-pod-cidr=true --advertise-loadbalancer-ip=true
+  --router-id=$(NODE_IP)`. Runs `hostNetwork: true` so BGP peering uses the
+  node's `bgp-net` IP (172.19.0.4/5) directly.
+- **FRR2** (`frr/frr.conf`): each worker is configured as a BGP neighbor with
+  `neighbor <ip> bfd`, plus a `bfd` peer block with sub-second timers
+  (`minimum-tx/rx-interval 300`, `detect-multiplier 3`). BGP hold timers
+  kept at 3/9 as a backstop.
 
+### LB VIP propagation
+
+```
+kube-router (AS 65001) ─►► (BFD) ►► FRR2 TOR-Cluster (AS 65000) ─► FRR1 TOR-Client (AS 65100) ─► FIB
+ (advertises /32 LB VIPs + PodCIDRs from each worker)
+```
 
 ### FRR configs
 
 **FRR2 TOR-Cluster** (`frr/frr.conf`): Local AS 65000, router ID 172.19.0.10.
-Two Cilium neighbors (172.19.0.4/5, AS 65001, TCP MD5 auth) and one TOR-Client
+Two kube-router neighbors (172.19.0.4/5, AS 65001) with `neighbor <ip> bfd`
+and matching `bfd` peer blocks for sub-second detection. One TOR-Client
 neighbor (172.23.0.1, AS 65100). Uses `neighbor 172.23.0.1 next-hop-self`
 so FRR1 sees the LB VIP's next-hop as FRR2's transit-net IP (172.23.0.2),
-forcing all traffic through the TOR-Cluster router. Without this, FRR1 would
-learn the Cilium worker IP (172.19.0.x, on a separate L2!) as the next-hop
+forcing all traffic through the TOR-Cluster router. Without this, FRR1
+would learn the worker IP (172.19.0.x, on a separate L2!) as the next-hop
 and attempt to forward traffic directly over transit-net, which doesn't
-have those routes — the packet would be dropped. Includes `no bgp
-ebgp-requires-policy` to accept routes without explicit policy. Zebra
-installs routes into the kernel FIB.
+have those routes — the packet would be dropped. Includes
+`no bgp ebgp-requires-policy` to accept routes without explicit policy.
+Zebra installs routes into the kernel FIB. `bfdd` is enabled in `frr/daemons`.
 
-**FRR1 TOR-Client** (`frr/frr1.conf`): Local AS 65100, router ID 172.23.0.1.
-Single eBGP peer (172.23.0.2, AS 65000) over transit-net. Advertises
-`network 172.21.0.0/24` to FRR2 for the return path.
+**FRR1 TOR-Client** (`frr/frr1.conf`): unchanged from sibling lab. Local
+AS 65100, router ID 172.23.0.1. Single eBGP peer (172.23.0.2, AS 65000)
+over transit-net. Advertises `network 172.21.0.0/24` to FRR2 for the return
+path.
 
-### Verifying LB route advertisement
+### Verifying BGP + BFD end-to-end
 
-`make up` applies the IP pool automatically. To test the full path:
+After `make up` + `make svc-apply`:
 
 ```sh
-# 1. Apply the sample LoadBalancer Service
-kubectl apply -f manifests/svc-lb.yaml
+# 1. kube-router pods are up on both workers
+make kuberouter-status
 
-# 2. Check the Service got an IP from the pool
-kubectl get svc test-lb
-# EXTERNAL-IP column should be 172.19.0.200 (not <pending>)
+# 2. kube-router sees FRR2 as BGP peer (Established)
+make kuberouter-bgp
 
-# 3. Check FRR2 (TOR-Cluster) learned the route from Cilium
-make frr2-routes         # show FRR2 TOR-Cluster RIB
-# → 172.19.0.200/32 via 172.19.0.4 and 172.19.0.5 (ECMP next-hops)
+# 3. FRR2 sees both kube-router peers Established
+make frr2-status
 
-# 4. Check FRR1 (TOR-Client) learned the route from FRR2
+# 4. BFD peer state on FRR2 — both workers should be "Up"
+make frr2-bfd
+
+# 5. FRR2 has the LB VIP route with two ECMP next-hops
+make frr2-routes
+# Look for: 172.19.0.200/32 with next-hop 172.19.0.4 AND 172.19.0.5
+
+# 6. FRR1 has the route via FRR2
 make frr1-routes
-# → 172.19.0.200/32 via 172.23.0.2 (next-hop = FRR2 TOR-Cluster on transit-net)
+# Look for: 172.19.0.200/32 via 172.23.0.2
 
-# 5. Verify kernel routes on both FRRs
-docker exec frr-speaker-cluster ip route show proto bgp
-docker exec frr-speaker-tor ip route show proto bgp
-
-# 6. Test HTTP reachability from FRR2 (TOR-Cluster) — direct bgp-net access
-docker exec frr-speaker-cluster wget -q -O- http://172.19.0.200 | head -5
+# 7. End-to-end
+make client-test
 ```
 
-The route is advertised even without matching pods — BGP is "up" but traffic
-blackholes until pods exist. The Deployment bundled in the same manifest
-creates nginx pods that match the Service selector, so the full path works
-immediately after `kubectl apply`.
+If `kubectl get svc test-lb` shows `<pending>` after `make svc-apply`,
+Cilium LB IPAM hasn't allocated — apply `make lb-pool-apply` first.
 
-See [Findings](#findings) for ECMP behavior and endpoint health details.
+### Authentication (TCP MD5)
+
+**Not enabled in this lab for the first iteration.** If you want to
+add it (to match the sibling lab once BFD is verified working):
+
+1. FRR side: in `frr/frr.conf`, add `neighbor <ip> password <secret>`
+   lines under each kube-router neighbor.
+2. kube-router side: add `--peer-password=<secret>` to the args in
+   `manifests/kube-router.yaml`. Be careful not to commit the secret in
+   plaintext — use a k8s Secret + env var/envFrom for any real reuse.
+3. Restart both sides: `make frr2-down && make frr2-up` + `kubectl -n
+   kube-system rollout restart ds/kube-router`.
+
+## Failover testing
+
+The whole point of this lab. Three failure modes, the same methodology
+as the sibling lab — but now with BFD we expect ~900ms (300ms × 3)
+detection on the network-partition failure mode instead of ~5s.
+
+### Methodology
+
+1. **`docker kill <worker>`** — Instantly tears down the veth pair. FRR
+   zebra receives an immediate netlink notification and removes the dead
+   nexthop from the FIB. Result with BFD: ~50ms failover (BFD doesn't
+   improve this; netlink is already instant). Unrealistic — no real
+   failure behaves this way.
+
+2. **`docker pause <worker>`** — Freezes all processes in the worker
+   container, including kube-router. The eBPF data plane (Cilium) keeps
+   forwarding traffic via native routing unaffected. BFD keepalives stop
+   being sent (TCP connection still present at kernel, but no app-level
+   BFD packets). Result: depends on whether BFD sleeps with the process
+   or the kernel still emits — empirically 0ms or ~900ms.
+
+3. **iptables isolation**: `iptables -A INPUT -s 172.19.0.10 -j DROP` and
+   `iptables -A OUTPUT -d 172.19.0.10 -j DROP` on the worker. This is
+   the realistic network partition. Expected with BFD 300×3: **~900ms
+   failover** (vs ~5s in the sibling lab without BFD).
+
+| Method                   | Bare BGP (sibling lab) | With BFD (this lab) |
+|--------------------------|------------------------|---------------------|
+| `docker kill`            | ~50ms                  | ~50ms (netlink)     |
+| `docker pause`           | 0ms (no loss)          | 0–900ms             |
+| iptables DROP (partition)| ~5s                    | **~900ms**          |
+
+### BGP timers (kept as backstop)
+
+FRR2 still has `neighbor <worker-ip> timers 3 9` so that if BFD ever
+fails to come up (e.g. mismatched config, image quirk), the lab still
+fails over within 9s instead of the default 90s. Likely belt-and-suspenders
+— but it makes the lab robust against a config mistake we'd otherwise
+spend an afternoon debugging.
+
+### BFD timers
+
+Set in `frr/frr.conf` under the `bfd` block: 300ms tx/rx intervals,
+detect-multiplier 3 → ~900ms failure detection upper bound. Same timers
+requested on kube-router's side via `--bfd-min-tx-interval=300000
+--bfd-min-rx-interval=300000 --bfd-detect-multiplier=3` (units:
+microseconds).
+
+### Suggested exercise sweep
+
+After baseline works:
+
+1. Scale workers down to 1 with `externalTrafficPolicy: Local` and verify
+   that on FRR2 only ONE next-hop is left for the LB VIP.
+2. Scale the go-httpbin Deployment to 0 — kube-router should withdraw the
+   VIP advertisement (`make frr2-routes` → no more 172.19.0.200/32).
+3. Trigger failure modes and measure timing with `time` during a parallel
+   curl loop:
+   ```sh
+   docker exec test-client sh -c 'while true; do curl -s -o /dev/null -w "%{http_code} %{time_total}\n" http://172.19.0.200; sleep 0.2; done' &
+   PID=$!
+   # In another terminal:
+   docker exec overlay-l3-bgp-bfd-worker iptables -A INPUT -s 172.19.0.10 -j DROP
+   docker exec overlay-l3-bgp-bfd-worker iptables -A OUTPUT -d 172.19.0.10 -j DROP
+   # Watch the curl loop — count the number of failed requests. With BFD
+   # expect ~5 failures in the 900ms window. Without BFD it was ~25 failures
+   # in the 5s window.
+   ```
 
 ## Findings
 
-Operational and behavioral notes accumulated while building and exercising the
-lab.
+Operational and behavioral notes — append as we run experiments.
 
-### F1. Service VIP is advertised by BGP even when no endpoints exist
+### F1. BFD comes up with both workers (expected)
 
-**What we saw:**
-- Created `Service/test-lb` (`type: LoadBalancer`, no matching pods).
-- Cilium allocated a `LoadBalancer` IP from
-  `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool` (e.g. `172.19.0.200`).
-- FRR learned `172.19.0.200/32` with **two ECMP next-hops** (one per node).
-- Both nodes had zero local endpoints for the service.
+After `make up`:
 
-**Why:** `CiliumBGPAdvertisement` advertises the **Service VIP**, not the
-Endpoints object. From Cilium's BGP control plane's perspective:
-- The Service exists with `type: LoadBalancer` and got an IP from the pool.
-- The advertisement config says "advertise `LoadBalancerIP`".
-- The BGP daemon does not check whether there are healthy backends before
-  pushing the route.
+```
+$ make frr2-bfd
+BFD Peers:
+        Peer 172.19.0.4
+                Session State: Up
+                ...
+        Peer 172.19.0.5
+                Session State: Up
+```
 
-So FRR installs the route, traffic from outside is ECMP'd to both nodes,
-hits the kube-proxy replacement (Cilium eBPF), finds no backend, and is
-dropped/refused. BGP looks "up", the service is a black hole.
+(TODO — capture real output.)
 
-**What to do:**
-- Create matching pods before treating the route as functional. Apply the
-  sample manifest which already bundles a go-httpbin Deployment:
-  ```sh
-  make svc-apply   # or: kubectl apply -f manifests/svc-lb.yaml
-  ```
-  Re-check `make frr2-routes` and curl the VIP from the test client.
+### F2. Failure mode timing TODO (placeholder)
 
-**How to make BGP honestly reflect endpoint health (advanced, optional):**
-- `externalTrafficPolicy: Local` on the Service: a node withdraws its route
-  when it has zero local endpoints. Other nodes still advertise.
-- Cilium's BGP CP has no built-in "only advertise if endpoints Ready" gate.
-  True readiness-aware advertisement requires either an external health
-  checker or a custom per-node BGP speaker that watches Endpoints.
-
-**Related:** [Questions §4](#4-will-creating-a-loadbalancer-service-produce-a-bgp-route)
-covers the IP-allocation side; this finding covers the endpoint-orthogonal
-side.
-
-### F2. ECMP next-hops from both nodes is by design
-
-**What we saw:**
-- `docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"` shows the
-  same Service prefix with two next-hops: `172.19.0.4` and `172.19.0.5`.
-
-**Why:** Every node in the cluster runs a Cilium BGP instance
-(`nodeSelector: {}` in `CiliumBGPClusterConfig/overlay-l3-bgp-bgp`), each
-peers with FRR at `172.19.0.10` AS 65000, and each advertises the same
-Service because the `CiliumBGPAdvertisement` has no per-node selector. FRR
-receives two equal-cost paths and installs both as ECMP next-hops.
-
-**When you DON'T want this:** set `externalTrafficPolicy: Local` on the
-Service. A node withdraws its advertisement when it has no local endpoint,
-so traffic only lands on a node that has a pod. From FRR's RIB the route
-appears from one node only (the one with the local pod).
-
-**Related:** [F1](#f1-service-vip-is-advertised-by-bgp-even-when-no-endpoints-exist).
-
-### F3. Verifying a BGP route end-to-end
-
-Three checks, in order of usefulness:
-
-1. **Service got an IP (LB IPAM working):**
-   ```sh
-   kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml get svc test-lb
-   # EXTERNAL-IP column should be 172.19.0.200-220, not <pending>
-   ```
-
-2. **BGP session is established:**
-   ```sh
-   make frr2-status
-   # Each neighbor's state should be "Established"
-   ```
-
-3. **Route is in FRR's RIB:**
-   ```sh
-   make frr2-routes
-   # or: docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"
-   ```
-   Look for the Service prefix (e.g. `172.19.0.200/32`) with next-hops on
-   `bgp-net` (`172.19.0.4` / `172.19.0.5`).
-
-If 1 passes but 2 fails → Cilium BGP CP can't reach the speaker; check
-`authSecretRef` secret, TCP MD5 password match, and `bgp-net` connectivity.
-If 2 passes but 3 doesn't show the Service prefix → advertisement selector
-isn't matching; verify the `CiliumBGPAdvertisement` and the Service labels.
-
-### F4. (placeholder)
-
-Add more findings as they surface.
+Fill with `docker kill` / `docker pause` / `iptables DROP` results once the lab is up — see Methodology table for what we expect.
 
 ## Cluster details
 
 ```
-  Cluster name:  overlay-l3-bgp
+  Cluster name:  overlay-l3-bgp-bfd
   Nodes:         1 control-plane + 2 workers
   Image:         kindest/node:v1.33.0
   CNI:           Cilium (kindnet disabled)
   kube-proxy:    disabled (eBPF replacement)
+  BGP/BFD:       kube-router DaemonSet (workers only, AS 65001)
   Kubeconfig:    ./.kubeconfig/kubeconfig.yaml
 ```
 
 ## Cilium configuration
 
-Cilium is installed with these key settings:
+Cilium is installed with these key settings (compare with sibling lab —
+only `bgpControlPlane.enabled` changes):
 
-| Setting                      | Value    | Why                                   |
-|------------------------------|----------|---------------------------------------|
-| `kubeProxyReplacement`       | true     | Replace kube-proxy with eBPF          |
-| `bgpControlPlane.enabled`    | true     | Enable BGP Control Plane              |
-| `hubble.enabled`             | true     | Observe traffic flows                 |
-| `hubble.relay.enabled`       | true     | Aggregate Hubble data across nodes    |
-| `hubble.ui.enabled`          | true     | Web UI for Hubble                     |
-| `ipam.mode`                  | kubernetes | Use K8s pod CIDR allocation         |
-| `bpf.masquerade`             | true     | eBPF-based masquerading (perf)        |
-| `devices`                    | {eth1}  | Single upstream NIC on bgp-net       |
-| `loadBalancer.mode`          | snat     | Source NAT for LB traffic (no DSR)    |
-| `routingMode`                | native   | Native routing, no overlay            |
-| `ipv4NativeRoutingCIDR`      | 10.244.0.0/16 | PodCIDR for native routing        |
+| Setting                      | Value           | Why                                          |
+|------------------------------|-----------------|----------------------------------------------|
+| `kubeProxyReplacement`       | true            | Replace kube-proxy with eBPF                 |
+| `bgpControlPlane.enabled`    | **false**       | kube-router owns BGP now (BFD)               |
+| `hubble.enabled`             | true            | Observe traffic flows                        |
+| `hubble.relay.enabled`       | true            | Aggregate Hubble data across nodes           |
+| `hubble.ui.enabled`          | true            | Web UI for Hubble                            |
+| `ipam.mode`                  | kubernetes      | kube-router reads `Node.spec.podCIDR`       |
+| `bpf.masquerade`             | true            | eBPF-based masquerading (perf)               |
+| `devices`                    | {eth1}          | Single upstream NIC on bgp-net               |
+| `loadBalancer.mode`          | snat            | Source NAT for LB traffic (no DSR)           |
+| `routingMode`                | native          | Native routing, no overlay                   |
+| `ipv4NativeRoutingCIDR`      | 10.244.0.0/16   | PodCIDR for native routing                   |
 
-Cilium runs in **native routing mode** (`routingMode=native`) — no Geneve
-encapsulation. Pod IPs are directly routable on the host network. Cilium
-advertises both PodCIDRs and LB VIPs to FRR2 via BGP, enabling the return
-path for pod-initiated connections.
+See [`scripts/install-cilium.sh`](scripts/install-cilium.sh) for the full helm set list.
 
-The `devices` option lists `eth1` only — all traffic (BGP peering, LB, pod
-inter-node, apiserver) flows through `bgp-net`. FRR2 is the default gateway,
-so kind nodes don't need a separate management bridge.
+### Why `ipam.mode=kubernetes` is required here
 
-## Failover testing
-
-BGP failover time was measured using three isolation methods to understand
-how the setup behaves under different failure scenarios.
-
-### Methodology
-
-1. **`docker kill <worker>`** — Instantly tears down the veth pair. FRR zebra
-   receives immediate netlink notification and removes the dead nexthop from
-   the FIB. Result: ~50ms failover. Unrealistic — no real failure behaves
-   this way.
-
-2. **`docker pause <worker>`** — Freezes all processes in the worker
-   container, including cilium-agent. The eBPF data plane continues
-   forwarding traffic via native routing unaffected. Result: **zero packet
-   loss**. Cilium's eBPF programs run in kernel space and survive user-space
-   agent death.
-
-3. **iptables isolation** — Simulates a network partition by adding
-   `iptables -A INPUT -s 172.19.0.10 -j DROP` and
-   `iptables -A OUTPUT -d 172.19.0.10 -j DROP` on the worker. FRR's TCP
-   connection monitoring detects the path failure before the BGP hold timer
-   expires. Result: ~5s failover detection, 1 dropped TCP connection during
-   transition.
-
-| Method | Failover time | Realism |
-|--------|--------------|---------|
-| `docker kill` | ~50ms | Low (veth teardown is instant) |
-| `docker pause` | 0ms (no loss) | Medium (eBPF survives) |
-| iptables DROP | ~5s | High (network partition) |
-
-### BGP timers
-
-FRR's hold timer was tuned from default 90s to 9s to reduce failover time:
-
-```
-neighbor 172.19.0.4 timers 3 9
-```
-
-Timer changes require a BGP session reset (`clear bgp 172.19.0.4`) to take
-effect — timer negotiation occurs in the BGP OPEN message.
-
-### BFD support
-
-Cilium's BGP Control Plane does **not** support BFD in version 1.19.x. The
-`CiliumBGPPeerConfig` CRD rejects BFD fields and does not expose timer
-configuration. Alternatives for faster failover:
-
-- Tune BGP timers (as above)
-- Use FRR zebra's nexthop tracking (automatic on Linux)
-- Deploy an external FRR router with BFD support as the BGP speaker
-
-### Key takeaways
-
-- Realistic failover testing requires simulating a network partition
-  (iptables DROP), not killing or pausing the container.
-- The eBPF data plane is independent of the cilium-agent user-space
-  process — forwarding continues during agent failure.
-- Without BFD, BGP hold timer (default 90s, tuned to 9s) determines failover
-  upper bound.
-- TCP failure detection can trigger faster than the hold timer (~5s in this
-  test).
-
-## Questions
-
-*From `QUESTIONS.md` — a running list of architectural / operational
-questions for this lab, with the current answer and a "why it matters" note.*
-
-### 1. Will this setup leak route advertisements or peer with other nodes? Do we have authentication?
-
-**Short answer: it won't leak, and auth is applied.**
-
-#### Why it doesn't leak
-
-- **FRR2 (TOR-Cluster) is configured with three static neighbors**
-  (`172.19.0.4`, `172.19.0.5`, `172.23.0.1` for FRR1) in `frr/frr.conf`. It
-  does not run `bgp listen Range` and only accepts inbound connections from
-  configured neighbors. So it cannot accidentally accept a peer from a host
-  on the Docker bridge.
-- **Cilium is configured with one static peer** (`172.19.0.10` AS 65000) in
-  `manifests/cilium-bgp.yaml` (`CiliumBGPClusterConfig/overlay-l3-bgp-bgp`).
-  It is also an active-mode initiator with a fixed peer address — it won't
-  accept an inbound session from an unknown neighbor either.
-- The speakers live on `bgp-net` (172.19.0.0/16), which is a dedicated
-  bridge. To leak, a foreign container would need to be **attached to that
-  exact network** (and know the static peer IPs), which is a host-local
-  Docker action, not a network event.
-- Routes are not exported to any other speaker (FRR has no other neighbors;
-  Cilium has no other peers).
-
-#### What is NOT set up (the risk surface)
-
-- FRR runs `no bgp ebgp-requires-policy`, so it accepts routes from
-  configured neighbors without explicit prefix-list or RPKI validation.
-- **No TTL / eBGP-multihop hardening beyond `ebgpMultihop: 1` on Cilium.**
-- **`bgp-net` is plain bridge L2.** Anyone with access to the Docker daemon
-  can `docker network connect bgp-net <any-container>` and impersonate either
-  peer. On a multi-tenant host, that's a real concern.
-
-#### Why it matters
-
-A BGP speaker on a shared bridge without auth is fine for a single-user
-laptop lab (the threat model is "I mess up my own cluster"), but is **not
-safe** to run on a shared host, CI runner, or cloud VM where other workloads
-can reach the Docker socket. A noisy neighbor or a malicious container could:
-
-1. Open a TCP/179 session to a Cilium worker IP and claim to be
-   `172.19.0.10` (no MD5 check would drop it) → inject black-hole routes
-   into Cilium → poison the cluster's egress for the prefix it advertises.
-2. Accept inbound BGP if `bgp-net` is ever bridged outward and drain the
-   Service VIP routes to an external speaker.
-
-#### Mitigations (status)
-
-- ✅ **TCP MD5 auth (RFC 2385) — APPLIED.** `CiliumBGPPeerConfig/overlay-l3-bgp-default`
-  references `authSecretRef: bgp-auth`, and the matching k8s Secret
-  (in `kube-system`, key `password`) is created by `make bgp-auth-secret`.
-  Each `neighbor` block in `frr/frr.conf` sets `password bgp-md5-secret-2026`.
-  The lab password is in plaintext — fine for a local lab, replace before
-  committing anywhere public. The default Makefile variable is
-  `BGP_AUTH_PASSWORD` (override with `make bgp-auth-secret BGP_AUTH_PASSWORD=...`).
-- 🟡 Optionally enable RPKI validation on FRR.
-- 🟡 Restrict `bgp-net` membership in `docker-compose.yml` (it's already
-  exclusive via `external: true`, but no MAC/IP allowlist).
-
-### 1a. Is it possible to add authentication?
-
-**Yes — both sides support TCP MD5 (RFC 2385).**
-
-- **Cilium side:** `CiliumBGPPeerConfig.spec.authSecretRef` references a k8s
-  Secret in the BGP secrets namespace (default `kube-system`, configurable
-  via `bgpControlPlane.secretNamespace.name`). The Secret must contain a key
-  `password`. If the Secret is missing, Cilium logs an error and the session
-  proceeds with an empty password (no auth, same as today) — so the Secret
-  must be created *before* the PeerConfig references it.
-- **FRR side:** `neighbor <addr> password "<value>"` in each neighbor block
-  of `frr/frr.conf`. Plain string in the file (mount as a docker-compose
-  secret or inject via env if you don't want it on disk).
-- **No asymmetric config** — both ends must have the same password or the
-  session will fail to come up; Cilium's failure mode is `dial: i/o timeout`
-  (the OS-level TCP MD5 mismatch drops SYN segments silently).
-- **Caveat:** TCP MD5 signs the TCP header, so the BGP source/destination IP
-  seen by each side must match the configured peer address exactly. In this
-  lab both sides use the `bgp-net` IP directly, so this is fine.
-- **Stronger options (not currently supported by both ends):** TCP-AO
-  (RFC 5925) is the successor to MD5 but Cilium BGP and FRR (bgpd) only do
-  MD5. For real production, use a dedicated underlay network (no shared L2).
-
-**Status: applied.** See "Mitigations" above — `make bgp-auth-secret`
-creates the k8s Secret and `frr/frr.conf` is committed with the matching
-password on each Cilium neighbor. To rotate: edit `frr/frr.conf`, change the
-password, `make bgp-auth-secret` with the new value, then `make frr-down &&
-make frr-up` and let Cilium reconcile.
-
-### 2. Is Cilium in overlay (tunnel) mode? (answered)
-
-**No — native routing.** Cilium is configured with `routingMode=native`
-and `devices={eth1}`. Pod-to-pod traffic routes directly on the host
-network (no Geneve encapsulation). Cross-node pod traffic flows through
-FRR2 (the default gateway).
-
-For L3 service reachability from an external speaker, this means:
-- Inbound LB traffic arrives at the node via BGP, Cilium SNATs it to the
-  node IP, and the backend pod replies via the node (un-NAT happens on the
-  node).
-- PodCIDR routes are advertised via BGP so FRR knows how to reach pod IPs
-  for the return path of pod-initiated connections.
-
-### 3. Is the setup isolated? (answered, partially)
-
-- `bgp-net` (172.19.0.0/16) is exclusive to this project.
-- The **kind Docker network is shared** with the `flux-cluster` cluster on
-  the host (both end up on the same `kind` bridge with overlapping CIDRs).
-  L2 reachability exists between `overlay-l3-bgp-*` nodes and
-  `flux-cluster-control-plane`. Mitigate by giving each kind cluster a
-  unique `--network-name` (not currently set in `kind.yaml`).
-
-### 4. Will creating a LoadBalancer Service produce a BGP route?
-
-**Yes, but only if a LoadBalancer IP is actually allocated.** The
-`CiliumBGPAdvertisement/overlay-l3-bgp-advert` advertises
-`Service/addresses: [LoadBalancerIP]`, and `kind` + plain Cilium do not
-ship with a LoadBalancer IPAM controller. `kubectl expose ... --type=
-LoadBalancer` will give `EXTERNAL-IP: <pending>` until you install
-LB IPAM (`CiliumLoadBalancerIPPool`) or annotate the service manually.
-
-When it does work, the route in FRR2 looks like:
-
-```
-172.19.0.200/32  next-hop 172.19.0.{4|5}  AS_PATH 65001  Origin i
-```
-
-ECMP happens when pods for the service are on both nodes, but only if
-`externalTrafficPolicy: Cluster` (the default). With
-`externalTrafficPolicy: Local`, a node withdraws its advertisement when it
-has no local endpoint.
-
-The `CiliumBGPAdvertisement` has no `selector` field, so it matches every
-LoadBalancer service in the cluster — by design foot-gun for a multi-tenant
-cluster; fine for a lab.
+kube-router reads each Node's `.spec.podCIDR` (set by K8s
+controller-manager) and advertises it to FRR2. With `ipam: calico`,
+the Node's `.spec.podCIDR` would NOT match Calico's actual allocations, so
+kube-router would advertise wrong CIDRs. Use of `ipam: kubernetes` (or
+Cilium's `ipam.mode: kubernetes`) is a hard requirement when integrating
+kube-router.
 
 ## Test client
 
 A permanent Alpine-based test client (`test-client`) lives on a separate
 subnet (`client-net`, 172.21.0.0/24) with FRR1 (TOR-Client) as its default
-gateway. This provides an isolated client outside `bgp-net` for realistic
-end-to-end testing across a two-hop BGP path.
-
-### Topology
-
-![Test client topology](assets/test-client.png)
-
-Traffic flow:
-
-1. `test-client` sends to LB VIP (172.19.0.200) → default gateway (FRR1 TOR-Client)
-2. FRR1 forwards via eBGP-learned route → FRR2 TOR-Cluster
-3. FRR2 forwards via eBGP-learned route → Cilium node (ECMP)
-4. Cilium SNATs inbound traffic to the node IP → delivers to backend pod via native routing (no tunnel, direct host-network)
-5. Pod responds, Cilium un-NATs the reply
-6. Return path: node → FRR2 (default gateway) → FRR1 → client
+gateway. Same as sibling lab.
 
 ### Usage
 
@@ -573,19 +413,23 @@ make client-test      # curl the LB VIP from the client
 docker exec -it test-client sh  # Interactive shell
 ```
 
-### Requirements
-
-The return path works automatically because FRR2 (172.19.0.10) is the default
-gateway for all kind nodes. FRR2 routes return traffic via its eBGP-learned
-route to `client-net` (172.21.0.0/24) → FRR1 → test-client.
-
-Inter-node PodCIDR routing also flows through FRR2 by default (native
-routing, no encapsulation) — no manual static routes needed.
-
 ## Cleanup
 
 ```sh
 make clean   # removes cluster + network
 ```
 
-[kind]: https://kind.sigs.k8s.io
+## Open questions / TODO
+
+- [ ] Validate which `cloudnativer/kube-router` image tag actually enables BFD.
+      v2.4.0 is the working assumption; if BFD does not come up, try v2.3.x
+      or v2.5.x.
+- [ ] Validate kube-router's BFD timer flag names
+      (`--bfd-min-tx-interval` etc.). If flags are rejected, fallback to
+      defaults and adjust FRR's timers to match kube-router defaults.
+- [ ] Confirm kube-router does NOT attempt to manage kernel routes when
+      `--run-firewall=false --run-service-proxy=false` — `ip route` on a
+      worker should only show Cilium's routes + the default via FRR2.
+- [ ] Add E1–E7 lab exercises from the original plan as we run them.
+- [ ] Replace the topology.png to reflect kube-router (current asset is
+      from the sibling lab labeled as Cilium BGP).
