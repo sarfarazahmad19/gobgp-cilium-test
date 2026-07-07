@@ -1,0 +1,175 @@
+---
+# kube-router — BGP+BFD speaker running as a DaemonSet on every worker node.
+#
+# Why kube-router instead of Cilium BGP Control Plane:
+#   Cilium BGP (in 1.19.x) has NO BFD support — only hold-timer-based failover.
+#   kube-router uses GoBGP which DOES support BFD, enabling sub-second failover
+#   to the FRR TOR (FRR2) on partial / silent link failure.
+#
+# Scope: ONLY BGP peering + advertisement.
+#   - --run-router=true           → run BGP daemon (advertise PodCIDR + LB VIPs)
+#   - --run-firewall=false        → do NOT touch iptables. Cilium owns the datapath (eBPF).
+#   - --run-service-proxy=false   → do NOT run IPVS. Cilium owns service routing (kubeProxyReplacement=true).
+#
+# What kube-router advertises to FRR2 (172.19.0.10):
+#   1. Per-node PodCIDR (.spec.podCIDR set by K8s controller-manager — requires
+#      ipam.mode=kubernetes, which is what Cilium is configured with).
+#   2. LoadBalancer Service VIPs (.status.loadBalancer.ingress[]).
+#
+# Cilium LB IPAM (CiliumLoadBalancerIPPool) is what allocates the VIPs in the
+# first place; kube-router only reads them from the Service status and advertises.
+#
+# ECMP: both workers advertise the same LB VIP /32 → FRR2 installs both as
+# equal-cost next-hops → ECMP distribution across the two nodes.
+#
+# Endpoints-aware advertisement: unlike Cilium's BGP CP (which advertises the
+# VIP regardless of endpoint state — see kind-native-routing-l3-lb README F1),
+# kube-router only advertises the VIP from nodes that have Ready local endpoints
+# when --advertise-loadbalancer-ip is set with externalTrafficPolicy=Local on
+# the Service. With externalTrafficPolicy=Cluster (default) it advertises from
+# all nodes regardless — same behavior as Cilium BGP.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-router
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-router
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - pods
+      - services
+      - endpoints
+      - namespaces
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-router
+subjects:
+  - kind: ServiceAccount
+    name: kube-router
+    namespace: kube-system
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-router
+  namespace: kube-system
+  labels:
+    app: kube-router
+spec:
+  selector:
+    matchLabels:
+      app: kube-router
+  template:
+    metadata:
+      labels:
+        app: kube-router
+    spec:
+      # Workers only — Cilium BGP CP in the original lab excluded the
+      # control-plane for the same reason: control-plane nodes don't run
+      # workloads and shouldn't advertise VIPs or PodCIDRs.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      serviceAccountName: kube-router
+      hostNetwork: true
+      # Coexist with Cilium: don't fight for iptables/eBPF. kube-router is
+      # here only to speak BGP+BFD on the host network and watch the
+      # Kubernetes API for Service VIPs + Node .spec.podCIDR.
+      containers:
+        - name: kube-router
+          image: docker.io/cloudnativer/kube-router:v2.4.0
+          #  ^^^ Pin a version known to bundle GoBGP with BFD support.
+          # If BFD does not come up with this tag, try v2.3.x or v2.5.x
+          # (kube-router switched GoBGP dep across minor releases —
+          # confirm with: kubectl -n kube-system exec ds/kube-router -- kube-router --help | grep -i bfd)
+          imagePullPolicy: IfNotPresent
+          args:
+            - --run-router=true
+            - --run-firewall=false
+            - --run-service-proxy=false
+            # Advertise the local node's PodCIDR (from Node.spec.podCIDR,
+            # set by K8s controller-manager under ipam: kubernetes).
+            - --advertise-pod-cidr=true
+            # Advertise LoadBalancer service VIPs (.status.loadBalancer.ingress).
+            # This is the L3-LB half of the architecture: VIP shows up as a
+            # /32 BGP route on FRR2 → ECMP across worker nodes advertising it.
+            - --advertise-loadbalancer-ip=true
+            # Enable BFD on the speaker side. FRR must also enable `neighbor
+            # <ip> bfd` and configure matching timers (see frr/frr.conf).
+            - --enable-bfd=true
+            # BFD timers — must agree (within reason) with the FRR peer block.
+            # kube-router's GoBGP uses microsecond units by default; the args
+            # below use the documented names from kube-router's CLI. If flags
+            # are rejected, the defaults (300ms / multiplier 3) usually apply.
+            - --bfd-min-tx-interval=300000
+            - --bfd-min-rx-interval=300000
+            - --bfd-detect-multiplier=3
+            # Peer to FRR2 TOR-Cluster (the border router + default gateway).
+            - --peer-router=172.19.0.10
+            - --peer-asn=65000
+            # Local ASN used by every kube-router pod. Must match the
+            # `remote-as 65001` lines on the FRR side.
+            - --cluster-asn=65001
+            # Use the host's bgp-net IP as the BGP router ID. Unique per node
+            # — avoids router-id collision on the FRR side.
+            - --router-id=$(NODE_IP)
+            # BGP listen port on the host network. FRR2 connects TO us at this
+            # port. kube-router defaults to 179; explicit for clarity.
+            - --bgp-port=179
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            # NET_ADMIN + SYS_ADMIN are required for BGP socket binding (port
+            # 179 < 1024) and any potential netlink ops. We do NOT use iptables
+            # here (--run-firewall=false), so capabilities could be tighter in
+            # clusters with stricter PSPs; for the lab this is fine.
+            privileged: true
+          # Liveness probe is intentionally simple — kube-router runs an HTTP
+          # /metrics endpoint on :8080 by default when metrics are enabled.
+          # If the pod is unresponsive, kubelet will restart it.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 20244   # kube-router's default health port
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /var/lib/kube-router
+              readOnly: true
+      volumes:
+        - name: kubeconfig
+          hostPath:
+            path: /var/lib/kube-router
+            type: DirectoryOrCreate

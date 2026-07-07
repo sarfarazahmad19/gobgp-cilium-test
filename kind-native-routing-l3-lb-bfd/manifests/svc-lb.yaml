@@ -1,0 +1,71 @@
+---
+# Sample LoadBalancer Service for end-to-end testing of the
+# Cilium → FRR LB IP advertisement path.
+#
+# With `CiliumLoadBalancerIPPool/overlay-l3-bgp-lb-pool` applied (range
+# 172.19.0.200-220), Cilium will allocate a LoadBalancer IP from that pool
+# automatically — no annotation needed. The IP shows up under
+# `status.loadBalancer.ingress[*].ip`.
+#
+# The `CiliumBGPAdvertisement/overlay-l3-bgp-advert` (in cilium-bgp.yaml) then
+# advertises that IP to the FRR2 (TOR-Cluster) speaker at 172.19.0.10. Verify with:
+#   kubectl --kubeconfig ./.kubeconfig/kubeconfig.yaml get svc test-lb
+#   make frr2-routes
+#   docker exec frr-speaker-cluster vtysh -c "show bgp ipv4 unicast"
+#
+# The Deployment below creates nginx pods matching the `app: test` selector,
+# so applying this file gives you a working end-to-end setup. Without
+# matching pods, the BGP route is still advertised (Cilium advertises
+# the VIP regardless of endpoint state), but traffic blackholes.
+#
+# `externalTrafficPolicy: Cluster` (default) → all nodes advertise the
+# route (ECMP from FRR's POV). Switch to `Local` to withdraw the
+# route from nodes with no local endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-lb
+  labels:
+    app: test
+spec:
+  type: LoadBalancer
+  selector:
+    app: test
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+
+---
+# Backend pods for the test-lb Service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-lb
+  labels:
+    app: test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: test
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: httpbin
+          image: mccutchen/go-httpbin:latest
+          ports:
+            - containerPort: 8080
