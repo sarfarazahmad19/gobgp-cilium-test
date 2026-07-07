@@ -76,9 +76,9 @@ done
 # Patch kubelet --node-ip on every node so kubelet reports the bgp-net IP
 # as InternalIP instead of the kind-net IP.  This is critical for BGP:
 # kube-router / GoBGP uses the node's InternalIP as the source address for
-# outgoing BGP connections (to FRR2).  Without this, GoBGP binds to the
-# bgp-net IP (from bgp-local-addresses annotation) but dials from the
-# kind-net IP, causing "Mismatched local address" errors.
+# outgoing BGP connections (to FRR2).  Without this, kubelet auto-detects
+# the kind-net IP (eth0) as InternalIP, and GoBGP dials from the wrong
+# address, causing "Mismatched local address" errors.
 # kind creates nodes with --node-ip=0.0.0.0 (auto-detect), which picks the
 # kind-net IP (eth0) first.  We patch kubeadm-flags.env to use the pinned
 # bgp-net IP, then restart kubelet so it re-registers with the correct IP.

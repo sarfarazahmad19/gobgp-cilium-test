@@ -105,11 +105,7 @@ spec:
       # Kubernetes API for Service VIPs + Node .spec.podCIDR.
       containers:
         - name: kube-router
-          image: docker.io/cloudnativelabs/kube-router:v2.4.0
-          #  ^^^ Pin a version known to bundle GoBGP with BFD support.
-          # If BFD does not come up with this tag, try v2.3.x or v2.5.x
-          # (kube-router switched GoBGP dep across minor releases —
-          # confirm with: kubectl -n kube-system exec ds/kube-router -- kube-router --help | grep -i bfd)
+          image: cloudnativelabs/kube-router-git:amd64-featimplement-bfd
           imagePullPolicy: IfNotPresent
           args:
             - --run-router=true
@@ -131,6 +127,12 @@ spec:
             # Local ASN used by every kube-router pod. Must match the
             # `remote-as 65001` lines on the FRR side.
             - --cluster-asn=65001
+            # BFD — sub-second failover. kube-router timers are in microseconds.
+            # FRR2 uses 300ms (300000us) intervals, detect-multiplier 3.
+            - --enable-bfd=true
+            - --bfd-detection-multiplier=3
+            - --bfd-required-min-rx-interval=300000
+            - --bfd-desired-min-tx-interval=300000
             # Use the host's bgp-net IP as the BGP router ID. Unique per node
             # — avoids router-id collision on the FRR side.
             - --router-id=$(NODE_IP)
@@ -147,15 +149,14 @@ spec:
               cpu: 500m
               memory: 256Mi
           securityContext:
-            # NET_ADMIN + SYS_ADMIN are required for BGP socket binding (port
-            # 179 < 1024) and any potential netlink ops. We do NOT use iptables
-            # here (--run-firewall=false), so capabilities could be tighter in
-            # clusters with stricter PSPs; for the lab this is fine.
             privileged: true
-          # No liveness probe — kube-router v2.4.0 doesn't expose /healthz
-          # on port 20244 by default, and the probe used status.hostIP which
-          # was the kind-net IP (now eliminated). The DaemonSet's
-          # strategy: RollingUpdate handles restarts if needed.
+          livenessProbe:
+            httpGet:
+              host: 127.0.0.1
+              path: /healthz
+              port: 20244
+            initialDelaySeconds: 30
+            periodSeconds: 10
           volumeMounts:
             - name: kubeconfig
               mountPath: /var/lib/kube-router
