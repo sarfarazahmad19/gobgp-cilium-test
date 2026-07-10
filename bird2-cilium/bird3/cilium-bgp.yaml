@@ -1,0 +1,82 @@
+---
+# Cilium BGP Cluster Config - enables BGP with local AS 64512
+# Cilium peers with Bird3 on localhost (127.0.0.1)
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux
+  bgpInstances:
+    - name: "instance-65000"
+      localASN: 64512
+      peers:
+        - name: "bird3-localhost"
+          peerAddress: "127.0.0.1"
+          peerASN: 65100
+          peerConfigRef:
+            name: "bird3-peer-config"
+---
+# Cilium BGP Peer Config - defines how Cilium peers with Bird3 on localhost
+# Uses matchExpressions to advertise both PodCIDRs and LoadBalancer VIPs
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPPeerConfig
+metadata:
+  name: bird3-peer-config
+spec:
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchExpressions:
+          - key: advertise
+            operator: In
+            values:
+              - "pod-cidr"
+              - "lb-vip"
+---
+# Cilium BGP Advertisement - advertise PodCIDRs to Bird3 (and onwards to TOR)
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPAdvertisement
+metadata:
+  name: pod-cidr-advert
+  labels:
+    advertise: "pod-cidr"
+spec:
+  advertisements:
+    - advertisementType: "PodCIDR"
+      attributes:
+        communities:
+          standard:
+            - "65000:100"
+---
+# Cilium BGP Advertisement - advertise LoadBalancer VIPs to Bird3 (and onwards to TOR)
+# Note: requires a selector to match services (otherwise no services are selected)
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPAdvertisement
+metadata:
+  name: lb-vip-advert
+  labels:
+    advertise: "lb-vip"
+spec:
+  advertisements:
+    - advertisementType: "Service"
+      selector:
+        matchLabels:
+          bgp-advertise: "lb"
+      service:
+        addresses:
+          - LoadBalancerIP
+---
+# Cilium LoadBalancer IP Pool - assigns external IPs to LoadBalancer services
+# Pool: 172.18.1.0/28 (16 IPs from kind network)
+apiVersion: cilium.io/v2alpha1
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: bgp-lb-pool
+spec:
+  allowFirstLastIPs: "No"
+  blocks:
+    - cidr: 172.18.1.0/28

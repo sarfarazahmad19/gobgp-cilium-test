@@ -1,0 +1,222 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bird3-bfd
+  namespace: kube-system
+  labels:
+    app: bird3-bfd
+spec:
+  selector:
+    matchLabels:
+      app: bird3-bfd
+  template:
+    metadata:
+      labels:
+        app: bird3-bfd
+    spec:
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      tolerations:
+        - operator: Exists
+      initContainers:
+        # First init container: inject TOR(s) as default route(s)
+        # so the second init container (which detects default routes)
+        # can discover them as BGP peers.
+        # Multiple TORs can be specified as a space-separated list.
+        - name: inject-tor-route
+          image: docker.io/library/bird3-lab:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              # TOR IPs - space-separated. Add as many TORs as needed.
+              TOR_IPS="172.18.0.100 172.18.0.50"
+
+              echo "=== Injecting TOR default route(s) ==="
+              echo "Current default routes:"
+              ip route show default
+
+              # Remove all existing default routes (including kind/Docker gateway)
+              # so configure-bird only discovers TOR IPs as BGP/BFD peers.
+              while ip route del default 2>/dev/null; do :; done
+
+              # Add TOR routes with metrics (Linux requires metrics for multiple defaults)
+              IDX=0
+              for TOR_IP in $TOR_IPS; do
+                  IDX=$((IDX + 1))
+                  ip route add default via ${TOR_IP} dev eth0 metric $((IDX * 100))
+                  echo "Added default route via ${TOR_IP} (metric $((IDX * 100)))"
+              done
+
+              echo "New default routes:"
+              ip route show default
+
+        - name: configure-bird
+          image: docker.io/library/bird3-lab:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "=== Bird3 Configuration ==="
+              echo "Using node IP: ${NODE_IP} (from Downward API status.hostIP)"
+
+              # Detect TOR peers from default routes
+              # Each default route gateway is treated as a TOR peer
+              TOR_PEERS=$(ip -j route show default | jq -r '.[].gateway')
+              if [ -z "$TOR_PEERS" ]; then
+                  echo "ERROR: No default routes found - cannot detect TOR peers"
+                  exit 1
+              fi
+              echo "Detected TOR peers (from default routes):"
+              echo "$TOR_PEERS" | sed 's/^/  /'
+
+              # Generate single BFD protocol with all TOR neighbors
+              # Then one BGP protocol per TOR peer
+              TOR_CONFIG=""
+              BFD_NEIGHBORS=""
+              for TOR_IP in $TOR_PEERS; do
+                  BFD_NEIGHBORS="${BFD_NEIGHBORS}
+                  neighbor ${TOR_IP} local ${NODE_IP};"
+              done
+              TOR_CONFIG="
+              protocol bfd bfd_tor {
+              ${BFD_NEIGHBORS}
+              }"
+
+              IDX=0
+              for TOR_IP in $TOR_PEERS; do
+                  IDX=$((IDX + 1))
+                  TOR_CONFIG="${TOR_CONFIG}
+
+              protocol bgp tor_${IDX} {
+                  local ${NODE_IP} as 65100;
+                  neighbor ${TOR_IP} as 65000;
+
+                  bfd on;
+
+                  ipv4 {
+                      import all;
+                      export filter {
+                          if source = RTS_DEVICE && net.len = 32 then reject;
+                          bgp_path.delete(64512);
+                          accept;
+                      };
+                      next hop self;
+                  };
+              }"
+              done
+
+              # Copy config template
+              cp /etc/bird-template/bird.conf /etc/bird/bird.conf
+
+              # Replace placeholders
+              sed -i "s|__NODE_IP__|${NODE_IP}|g" /etc/bird/bird.conf
+
+              # Use python to replace __TOR_PEERS__ with multi-line content
+              # (avoids sed's multiline issues)
+              python3 -c "
+              import sys
+              with open('/etc/bird/bird.conf', 'r') as f:
+                  content = f.read()
+              tor_config = '''${TOR_CONFIG}'''
+              content = content.replace('__TOR_PEERS__', tor_config)
+              with open('/etc/bird/bird.conf', 'w') as f:
+                  f.write(content)
+              " || {
+                  echo "python3 not available, trying sed"
+                  # Fallback: use awk to replace placeholder
+                  awk -v tor_config="${TOR_CONFIG}" '
+                      /__TOR_PEERS__/ { print tor_config; next }
+                      { print }
+                  ' /etc/bird/bird.conf > /tmp/bird.conf.new
+                  mv /tmp/bird.conf.new /etc/bird/bird.conf
+              }
+
+              echo "Bird3 config updated:"
+              echo "  Local IP: ${NODE_IP}"
+              echo "  TOR peers:"
+              echo "$TOR_PEERS" | sed 's/^/    /'
+              echo "  Local AS: 65100"
+              echo "  Cilium: 127.0.0.1 (AS 64512)"
+              echo "  TOR AS: 65000"
+
+              echo "--- Final bird.conf ---"
+              cat /etc/bird/bird.conf
+              echo "--- End bird.conf ---"
+          volumeMounts:
+            - name: bird-config
+              mountPath: /etc/bird
+            - name: bird-template
+              mountPath: /etc/bird-template
+      containers:
+        - name: bird3
+          image: docker.io/library/bird3-lab:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          command:
+            - /usr/sbin/bird
+            - -d
+            - -c
+            - /etc/bird/bird.conf
+            - -s
+            - /var/run/bird.ctl
+          ports:
+            - containerPort: 179
+              name: bgp
+              hostPort: 179
+            - containerPort: 3784
+              name: bfd
+              hostPort: 3784
+              protocol: UDP
+          volumeMounts:
+            - name: bird-config
+              mountPath: /etc/bird
+            - name: bird-run
+              mountPath: /var/run
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  birdc -s /var/run/bird.ctl show protocols 2>/dev/null | grep -E "tor_[0-9]+|cilium_local" | grep -q "Established\|established" || exit 1
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - birdc -s /var/run/bird.ctl show protocols 2>/dev/null | grep -q "Established\|established"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: bird-config
+          emptyDir: {}
+        - name: bird-template
+          configMap:
+            name: bird3-config
+        - name: bird-run
+          emptyDir: {}
+      nodeSelector:
+        kubernetes.io/os: linux
