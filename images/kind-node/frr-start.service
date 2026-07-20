@@ -1,0 +1,12 @@
+[Unit]
+Description=FRR startup for containerlab fabric
+After=network.target
+Before=kubelet.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/frr/frrinit.sh start
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

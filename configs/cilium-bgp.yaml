@@ -1,0 +1,114 @@
+---
+# Cilium BGP Cluster Config - Cilium (AS 64512) peers with local FRR (AS 65001)
+# on loopback 127.0.0.1 on every node.
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/os: linux
+  bgpInstances:
+    - name: "instance-65001"
+      localASN: 64512
+      peers:
+        - name: "frr-localhost"
+          peerAddress: "127.0.0.1"
+          peerASN: 65001
+          peerConfigRef:
+            name: "frr-peer-config"
+---
+# Cilium BGP Peer Config - timers and route advertisements for the loopback session
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: frr-peer-config
+spec:
+  timers:
+    connectRetryTimeSeconds: 5
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchExpressions:
+          - key: advertise
+            operator: In
+            values:
+              - "pod-cidr"
+              - "lb-vip"
+---
+# Cilium BGP Advertisement - advertise Pod CIDRs to FRR (and onwards to ToRs).
+# Uses advertisementType CiliumPodIPPool (NOT PodCIDR): under multi-pool IPAM the
+# per-node CIDRs live in CiliumNode.spec.ipam.pools.allocated, which the PodCIDR
+# type does not read — so PodCIDR advertises nothing. CiliumPodIPPool with an
+# empty selector advertises every pool's per-node block (default + cp-pool).
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: pod-cidr-advert
+  labels:
+    advertise: "pod-cidr"
+spec:
+  advertisements:
+    - advertisementType: "CiliumPodIPPool"
+      selector: {}          # empty selector = advertise every CiliumPodIPPool
+      attributes:
+        communities:
+          standard:
+            - "65001:100"
+---
+# Cilium BGP Advertisement - advertise LoadBalancer VIPs to FRR (and onwards to ToRs)
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: lb-vip-advert
+  labels:
+    advertise: "lb-vip"
+spec:
+  advertisements:
+    - advertisementType: "Service"
+      selector:
+        matchLabels:
+          bgp-advertise: "lb"
+      service:
+        addresses:
+          - LoadBalancerIP
+---
+# Cilium LoadBalancer IP Pool - first pool
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: bgp-lb-pool-1
+spec:
+  allowFirstLastIPs: "No"
+  blocks:
+    - cidr: 10.99.100.0/28
+---
+# Cilium LoadBalancer IP Pool - second pool
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: bgp-lb-pool-2
+spec:
+  allowFirstLastIPs: "No"
+  blocks:
+    - cidr: 10.99.101.0/28
+---
+# Second Pod IP pool — proves multi-pool IPAM. Pods annotated
+# `ipam.cilium.io/ipv4-pool: cp-pool` draw from here instead of the default
+# 10.99.40.0/22 pool (auto-created by the Helm install). Demonstrated on the CP
+# node via configs/test-lb-cp.yaml; the node's /27 block is advertised into the
+# fabric by the pod-cidr-advert (CiliumPodIPPool) above.
+# NOTE: CiliumPodIPPool is still only served as v2alpha1 (BGP/LB CRDs are v2).
+apiVersion: cilium.io/v2alpha1
+kind: CiliumPodIPPool
+metadata:
+  name: cp-pool
+spec:
+  ipv4:
+    cidrs:
+      - 10.99.200.0/24
+    maskSize: 27

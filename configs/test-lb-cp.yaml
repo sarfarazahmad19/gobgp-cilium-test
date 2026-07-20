@@ -1,0 +1,77 @@
+# Control-plane-node demo (deploys to kube-system — lab, no dedicated namespace):
+# LoadBalancer + backend + debug client, all pinned to k8s-control-plane and
+# drawing their Pod IPs from the second pool (cp-pool, 10.99.200.0/24) via the
+# `ipam.cilium.io/ipv4-pool` annotation.
+#
+# Exercises two things on the single-homed cp -> spine-border path:
+#   1. multi-pool IPAM  — pods get IPs from cp-pool, not the default 10.99.40.0/22
+#   2. LB VIP advertise — the Service (labeled bgp-advertise: lb) is announced by
+#      cp's FRR into the fabric.
+#
+# The default test-lb.yaml never lands on cp (control-plane NoSchedule taint), so
+# this is the cp-side counterpart. Requires cp-pool (configs/cilium-bgp.yaml,
+# applied by `just cilium-bgp`).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpbin
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpbin
+  template:
+    metadata:
+      labels:
+        app: httpbin
+      annotations:
+        ipam.cilium.io/ipv4-pool: cp-pool
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: k8s-control-plane
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: httpbin
+          image: mccutchen/go-httpbin:2.24.0
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: httpbin-lb-cp
+  namespace: kube-system
+  labels:
+    bgp-advertise: "lb"
+spec:
+  type: LoadBalancer
+  selector:
+    app: httpbin
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Debug client on the same node/pool — exec in to curl the VIP, check routes, etc.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-cp
+  namespace: kube-system
+  annotations:
+    ipam.cilium.io/ipv4-pool: cp-pool
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: k8s-control-plane
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: netshoot
+      image: nicolaka/netshoot:v0.13
+      command: ["sleep", "infinity"]
