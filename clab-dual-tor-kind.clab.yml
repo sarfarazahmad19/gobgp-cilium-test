@@ -1,0 +1,87 @@
+name: dual-tor-kind
+
+# Node keys are descriptive and match their config dirs + FRR hostnames.
+# Container names are clab-dual-tor-kind-<key> for fabric nodes; the kind
+# cluster is "k8s" so K8s containers are k8s-control-plane / k8s-worker (rack1)
+# / k8s-worker2 (rack2).
+topology:
+  nodes:
+    # --- FRR fabric (10.99.0.0/16) ---
+    rack1-tor-a:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/rack1-tor-a/frr.conf:/etc/frr/frr.conf:ro
+        - configs/rack1-tor-a/daemons:/etc/frr/daemons:ro
+
+    rack1-tor-b:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/rack1-tor-b/frr.conf:/etc/frr/frr.conf:ro
+        - configs/rack1-tor-b/daemons:/etc/frr/daemons:ro
+
+    spine-fabric:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/spine-fabric/frr.conf:/etc/frr/frr.conf:ro
+        - configs/spine-fabric/daemons:/etc/frr/daemons:ro
+        - configs/spine-fabric/snat.sh:/snat.sh:ro
+      exec:
+        - /snat.sh
+
+    spine-border:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/spine-border/frr.conf:/etc/frr/frr.conf:ro
+        - configs/spine-border/daemons:/etc/frr/daemons:ro
+        - configs/spine-border/snat.sh:/snat.sh:ro
+      exec:
+        - /snat.sh
+
+    rack2-tor-a:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/rack2-tor-a/frr.conf:/etc/frr/frr.conf:ro
+        - configs/rack2-tor-a/daemons:/etc/frr/daemons:ro
+
+    rack2-tor-b:
+      kind: linux
+      image: docker.io/frrouting/frr:latest
+      binds:
+        - configs/rack2-tor-b/frr.conf:/etc/frr/frr.conf:ro
+        - configs/rack2-tor-b/daemons:/etc/frr/daemons:ro
+
+    # --- K8s layer (k8s-kind); kind cluster name = "k8s" ---
+    k8s:
+      kind: k8s-kind
+      image: kind-node-with-frr:latest
+      startup-config: configs/kind-config.yaml
+      extras:
+        k8s_kind:
+          deploy:
+            wait: 60s
+
+    k8s-control-plane:
+      kind: ext-container
+
+    k8s-worker:
+      kind: ext-container
+
+    k8s-worker2:
+      kind: ext-container
+
+  links:
+    - endpoints: ["k8s-worker:eth1", "rack1-tor-a:eth1"]
+    - endpoints: ["k8s-worker:eth2", "rack1-tor-b:eth1"]
+    - endpoints: ["k8s-worker2:eth1", "rack2-tor-a:eth1"]
+    - endpoints: ["k8s-worker2:eth2", "rack2-tor-b:eth1"]
+    - endpoints: ["spine-fabric:eth1", "rack1-tor-a:eth3"]
+    - endpoints: ["spine-fabric:eth2", "rack1-tor-b:eth3"]
+    - endpoints: ["spine-fabric:eth3", "spine-border:eth1"]
+    - endpoints: ["spine-fabric:eth4", "rack2-tor-a:eth3"]
+    - endpoints: ["spine-fabric:eth5", "rack2-tor-b:eth3"]
+    - endpoints: ["spine-border:eth2", "k8s-control-plane:eth1"]
