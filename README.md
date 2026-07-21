@@ -68,3 +68,5 @@ just cp-pool-test     # (demo) prove multi-pool IPAM — CP node draws from cp-p
 Per-node helpers: `just k8s-worker-sessions`, `just rack1-tor-a-routes`,
 `just spine-fabric-cmd "<vtysh cmd>"`, etc. Run `just` (or `just --list`) for all.
 
+## Resources.
+- Youtube : https://www.youtube.com/watch?v=7prUnxglfCk&t=4s
